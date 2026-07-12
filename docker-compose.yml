@@ -1,0 +1,79 @@
+services:
+
+  # ── PostgreSQL — experiment metadata, circuit schemas ──────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: quantum_sim
+      POSTGRES_USER: qsim
+      POSTGRES_PASSWORD: qsim_secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qsim"]
+      interval: 5s
+      retries: 5
+
+  # ── MongoDB — tomography results, noise model configs ─────────────────────
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_DATABASE: quantum_sim
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  # ── InfluxDB — raw timeseries measurement results ─────────────────────────
+  influxdb:
+    image: influxdb:2.7-alpine
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: qsim
+      DOCKER_INFLUXDB_INIT_PASSWORD: qsim_secret
+      DOCKER_INFLUXDB_INIT_ORG: quantum-sim
+      DOCKER_INFLUXDB_INIT_BUCKET: experiments
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: qsim-dev-token
+    ports:
+      - "8086:8086"
+    volumes:
+      - influx_data:/var/lib/influxdb2
+
+  # ── MinIO — object storage for large state vectors / matrices ────────────
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: qsim
+      MINIO_ROOT_PASSWORD: qsim_secret
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console → http://localhost:9001
+    volumes:
+      - minio_data:/data
+
+  # ── Redis — Celery broker + result backend ────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # ── Grafana — dashboards for experiment results ───────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: qsim_secret
+    ports:
+      - "3000:3000"   # http://localhost:3000  admin / qsim_secret
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning
+
+volumes:
+  pg_data:
+  mongo_data:
+  influx_data:
+  minio_data:
+  grafana_data:

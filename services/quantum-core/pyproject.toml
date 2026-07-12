@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantum-core"
+version = "0.1.0"
+description = "Backend abstraction, algorithms, and hw/sw synchronization primitives for the quantum platform demo."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools]
+packages = ["quantum_core"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
