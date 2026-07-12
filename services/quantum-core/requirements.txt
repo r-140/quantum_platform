@@ -1,15 +1,8 @@
-# Runtime dependencies for quantum-core.
-#
-# Everything in backends/base.py, mock_hw_backend.py, and sync/polling.py
-# uses only the Python standard library and has no dependencies here.
-# qiskit/qiskit-aer are required starting with aer_backend.py, and will be
-# required by algorithms/ once Grover/QFT-QPE/VQE are implemented.
+# Runtime dependencies (qiskit, qiskit-aer, scipy) are now declared in
+# pyproject.toml's [project.dependencies] -- that's what makes them
+# transitively installed when another service does
+# `pip install -e ../quantum-core` (see services/api/requirements.txt).
+# This file now only pins dev/test tooling not needed by dependents.
 
-qiskit>=1.0
-qiskit-aer>=0.17
-scipy>=1.14   # classical optimizer (COBYLA) for vqe_loop.py
-
-# Dev/test dependencies -- move to a separate requirements-dev.txt once the
-# test suite exists.
 pytest>=8.0
 pytest-asyncio>=0.23
