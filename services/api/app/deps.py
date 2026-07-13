@@ -14,7 +14,6 @@ from __future__ import annotations
 import threading
 from datetime import datetime, timezone
 
-from quantum_core.backends.aer_backend import AerBackend
 from quantum_core.backends.base import QuantumBackend
 
 from app.schemas.experiments import ExperimentResponse
@@ -25,6 +24,16 @@ _backend: QuantumBackend | None = None
 def get_backend() -> QuantumBackend:
     """A single shared AerBackend instance for the process lifetime.
 
+    The import is deliberately local to this function, not at module level:
+    `app.deps` is imported by nearly everything in this service (routers,
+    tests), and an eager `from quantum_core.backends.aer_backend import
+    AerBackend` at module level would mean *anything* touching `app.deps` --
+    including tests that only care about `ExperimentStore`'s pure-Python
+    logic -- transitively requires qiskit/qiskit-aer to be importable.
+    Deferring the import to call time decouples "can I import this module"
+    from "do I need a real quantum backend", which is exactly what API-layer
+    unit tests want (see tests/README or docs/testing.md).
+
     Kept as a plain module-level singleton rather than FastAPI's
     `lifespan`-managed state for now, to keep this first version simple --
     revisit if/when the API needs to support multiple backend types
@@ -32,6 +41,8 @@ def get_backend() -> QuantumBackend:
     """
     global _backend
     if _backend is None:
+        from quantum_core.backends.aer_backend import AerBackend
+
         _backend = AerBackend()
     return _backend
 

@@ -69,29 +69,55 @@ In-memory хранилище экспериментов (`ExperimentStore`) — 
 — каждый получит свою копию. Именно этот пробел должен закрыть Postgres,
 когда дойдём до storage-слоя.
 
-## ⚠️ Степень проверки
+## Юнит-тесты
 
-**Ничего в этом сервисе не запускалось** — в отличие от файлов на Qiskit
-(где я мог хотя бы перепроверить математику независимо через numpy), у
-меня в среде нет ни `fastapi`, ни `pydantic`, ни сети для их установки.
-Единственное, что было проверено — конкретный синтаксис Pydantic
-discriminated union с enum (через веб-поиск документации, см. оговорку
-про `Literal["grover"]` выше). Всё остальное — код, написанный по
-известному мне API FastAPI/Starlette/Pydantic, без единого реального
-прогона.
+```
+tests/
+├── conftest.py               # fixture client (TestClient) + fresh_store (изоляция между тестами)
+├── test_store.py             # ExperimentStore напрямую -- без Qiskit благодаря ленивому импорту в deps.py
+├── test_experiments_router.py # dispatch, ошибки как FAILED (не 500), threadpool для VQE, GET-эндпоинты
+└── test_validation.py        # граничные случаи Pydantic-схем (422 при некорректных данных)
+```
 
-**Обязательно сделай smoke-test перед тем как считать это готовым:**
+`app.execution`'s функции (`run_grover`, `run_sat_grover`, `run_qpe`,
+`run_vqe_sync`) в `test_experiments_router.py` подменены (`monkeypatch`) на
+мгновенные заглушки — тесты проверяют HTTP-слой (валидация, dispatch,
+статус-коды, обработка ошибок, offload VQE в threadpool), а не физическую
+корректность самих алгоритмов (это уже покрыто демками `quantum_core`).
+
+⚠️ **Важный нюанс про `app/deps.py`**: импорт `AerBackend` сделан
+ленивым (внутри `get_backend()`, а не на уровне модуля) — иначе любой тест
+API, даже `test_store.py` (чистая Python-логика `ExperimentStore`, без
+единого HTTP-запроса), тянул бы за собой `qiskit` просто через цепочку
+импортов `app.deps → quantum_core.backends.aer_backend → qiskit_aer`.
+`test_experiments_router.py`/`test_validation.py` всё равно требуют Qiskit
+установленным (они импортируют `app.main`, а тот тянет `execution.py`,
+которая напрямую строит реальные Qiskit-схемы в бизнес-логике) — но это
+ожидаемо, так как Qiskit и так обязательная зависимость этого сервиса.
 
 ```bash
 cd services/api
-python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+pytest tests/ -v
 ```
 
-Затем в другом терминале (с активным `.venv` из `services/quantum-core`,
-либо просто `curl`):
+## ⚠️ Степень проверки
+
+Сам API (все 4 эндпоинта, discriminated union, sync/async мост для VQE
+через `run_in_threadpool`) **подтверждён рабочим** — прогнан вручную через
+`curl` для всех четырёх алгоритмов, включая проверку, что `/health`
+отвечает мгновенно во время работы VQE в фоне (см. историю разработки).
+Юнит-тесты выше — новый код, добавленный после этой проверки, и **сами
+тесты** ещё не прогонялись ни разу (нет `pytest`/`fastapi`/`httpx` в моей
+среде). Прогони `pytest tests/ -v` и пришли результат.
+
+Если захочется повторить ручную проверку эндпоинтов:
+
+```bash
+cd services/api
+source .venv/bin/activate
+uvicorn app.main:app --reload --port 8000
+```
 
 ```bash
 curl http://localhost:8000/health
@@ -99,8 +125,8 @@ curl http://localhost:8000/health
 curl -X POST http://localhost:8000/experiments \
   -H "Content-Type: application/json" \
   -d '{"algorithm": "grover", "marked_states": ["101"]}'
-  
-  # SAT-Grover
+
+# SAT-Grover
 curl -X POST http://localhost:8000/experiments -H "Content-Type: application/json" \
   -d '{"algorithm": "sat_grover", "variables": ["x0","x1","x2","x3"], "expression": "(x0 | x1) & (~x1 | x2) & (x0 | ~x3)"}'
 
@@ -113,13 +139,4 @@ curl -X POST http://localhost:8000/experiments -H "Content-Type: application/jso
   -d '{"algorithm": "vqe"}'
 ```
 
-Либо открой `http://localhost:8000/docs` — интерактивная Swagger-документация,
-там же можно проверить, что схема discriminated union отрисовалась корректно
-(это как раз то место, где проявился бы упомянутый выше баг с Enum-дискриминатором,
-если бы я его не обошёл).
-
-Ожидаемый результат последнего запроса — JSON с `status: "completed"` и
-`result.counts`, где `"101"` доминирует — как в `demo_grover.py`.
-
-Пришли, что получилось — если что-то не заведётся, разберём отдельно от
-уже проверенной логики `quantum_core`.
+Интерактивная документация — `http://localhost:8000/docs`.
