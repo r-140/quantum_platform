@@ -1,17 +1,14 @@
 """
 Unit tests for the experiments router, via FastAPI's TestClient.
 
-`app.execution`'s functions (run_grover, run_sat_grover, run_qpe,
-run_vqe_sync) are monkeypatched to return canned results instantly. These
-tests exercise the HTTP layer -- request validation, dispatch to the right
-execution function, status codes, error handling, and the threadpool
-offload for VQE -- in isolation from real quantum computation, which is
-already covered by quantum_core's own demos and (for polling/backends)
-unit tests. Monkeypatching `app.execution.run_grover` etc. works correctly
-here specifically because routers/experiments.py calls these as
-`execution.run_grover(...)` (an attribute lookup on the module object at
-call time), not via a `from app.execution import run_grover` binding
-captured at import time -- patching the module attribute is visible there.
+POST /experiments now enqueues a task and returns immediately with
+status=queued -- it no longer executes anything in-process (see
+routers/experiments.py's docstring for why). These tests monkeypatch
+`app.deps.publish_task` to a no-op/recording fake, so they never need a
+real RabbitMQ connection -- they verify the API's side of the contract
+(what gets published, what the immediate response looks like), not the
+orchestrator's execution or the full round trip through a real broker
+(that's an integration-level concern; see docs/testing.md).
 """
 
 from __future__ import annotations
@@ -19,7 +16,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from app import execution
+from app import deps
 
 
 def test_health(client: TestClient) -> None:
@@ -38,110 +35,97 @@ def test_list_backends(client: TestClient) -> None:
     assert backends[0]["name"] == "aer-simulator"
 
 
-def test_grover_dispatch(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    received_requests = []
+def test_grover_submit_enqueues_and_returns_queued(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    published_tasks = []
 
-    async def fake_run_grover(backend, request):
-        received_requests.append(request)
-        return {"counts": {"101": 1000}}
+    async def fake_publish_task(task):
+        published_tasks.append(task)
 
-    monkeypatch.setattr(execution, "run_grover", fake_run_grover)
+    monkeypatch.setattr(deps, "publish_task", fake_publish_task)
 
     response = client.post("/experiments", json={"algorithm": "grover", "marked_states": ["101"]})
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     body = response.json()
     assert body["algorithm"] == "grover"
-    assert body["status"] == "completed"
-    assert body["result"] == {"counts": {"101": 1000}}
-    assert body["error"] is None
-    assert len(received_requests) == 1
-    assert received_requests[0].marked_states == ["101"]
+    assert body["status"] == "queued"
+    assert body["result"] is None
+    assert body["completed_at"] is None
+
+    assert len(published_tasks) == 1
+    task = published_tasks[0]
+    assert task.experiment_id == body["id"]
+    assert task.algorithm == "grover"
+    assert task.params == {"marked_states": ["101"], "shots": 1024}
 
 
-def test_sat_grover_dispatch(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_run_sat_grover(backend, request):
-        return {"solutions": ["0110"], "expression": request.expression}
+def test_sat_grover_submit_params_shape(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    published_tasks = []
 
-    monkeypatch.setattr(execution, "run_sat_grover", fake_run_sat_grover)
+    async def fake_publish_task(task):
+        published_tasks.append(task)
+
+    monkeypatch.setattr(deps, "publish_task", fake_publish_task)
 
     response = client.post(
         "/experiments",
         json={"algorithm": "sat_grover", "variables": ["x0", "x1"], "expression": "x0 & x1"},
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["algorithm"] == "sat_grover"
-    assert body["result"] == {"solutions": ["0110"], "expression": "x0 & x1"}
+    assert response.status_code == 202
+    assert published_tasks[0].params == {
+        "variables": ["x0", "x1"],
+        "expression": "x0 & x1",
+        "shots": 1024,
+    }
 
 
-def test_qpe_dispatch(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_run_qpe(backend, request):
-        return {"true_phi": request.phi, "resolution": 1 / (2**request.num_counting_qubits)}
-
-    monkeypatch.setattr(execution, "run_qpe", fake_run_qpe)
-
-    response = client.post("/experiments", json={"algorithm": "qpe", "phi": 0.625})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["algorithm"] == "qpe"
-    assert body["result"]["true_phi"] == 0.625
-
-
-def test_vqe_dispatch_via_threadpool(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`run_vqe_sync` is a plain synchronous function -- the router must
-    call it through `run_in_threadpool`, never `await` it directly (direct
-    await would try to await a plain dict/value, not a coroutine, and
-    FastAPI would raise immediately). This test's fake is intentionally
-    also a plain sync `def`, matching the real function's signature: if the
-    router regressed to something incompatible with `run_in_threadpool`
-    (e.g. trying to `await execution.run_vqe_sync(...)` directly), this
-    would surface as a clear failure here rather than passing silently.
+def test_vqe_submit_params_shape(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """VQE no longer needs any special handling on the API side (no
+    threadpool offload) -- it's enqueued exactly like every other
+    algorithm. That asymmetry now lives entirely in the orchestrator (see
+    services/orchestrator/app/worker.py's use of run_in_executor).
     """
-    received_requests = []
+    published_tasks = []
 
-    def fake_run_vqe_sync(backend, request):
-        received_requests.append(request)
-        return {"total_energy": -1.14, "iterations_run": 5}
+    async def fake_publish_task(task):
+        published_tasks.append(task)
 
-    monkeypatch.setattr(execution, "run_vqe_sync", fake_run_vqe_sync)
+    monkeypatch.setattr(deps, "publish_task", fake_publish_task)
 
     response = client.post("/experiments", json={"algorithm": "vqe"})
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["algorithm"] == "vqe"
-    assert body["result"] == {"total_energy": -1.14, "iterations_run": 5}
-    assert len(received_requests) == 1
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    assert published_tasks[0].params == {"shots": 8192, "max_iterations": 80}
 
 
-def test_execution_error_becomes_failed_not_500(
+def test_enqueue_failure_becomes_failed_not_500(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def failing_run_grover(backend, request):
-        raise RuntimeError("simulator exploded")
+    async def failing_publish_task(task):
+        raise ConnectionError("RabbitMQ unreachable")
 
-    monkeypatch.setattr(execution, "run_grover", failing_run_grover)
+    monkeypatch.setattr(deps, "publish_task", failing_publish_task)
 
     response = client.post("/experiments", json={"algorithm": "grover", "marked_states": ["101"]})
 
-    # A backend/circuit error becomes a FAILED experiment record, not a
-    # raw 500 -- callers can always expect a well-formed ExperimentResponse
-    # from this endpoint. See routers/experiments.py's broad except clause.
-    assert response.status_code == 200
+    # Not a 500 -- if we can't even enqueue, that's captured as a FAILED
+    # experiment record, consistent with how execution failures are
+    # reported once an experiment *does* reach the orchestrator.
+    assert response.status_code == 202
     body = response.json()
     assert body["status"] == "failed"
-    assert body["error"] == "simulator exploded"
-    assert body["result"] is None
+    assert "RabbitMQ unreachable" in body["error"]
 
 
 def test_get_experiment_by_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_run_grover(backend, request):
-        return {"counts": {"101": 1000}}
+    async def fake_publish_task(task):
+        pass
 
-    monkeypatch.setattr(execution, "run_grover", fake_run_grover)
+    monkeypatch.setattr(deps, "publish_task", fake_publish_task)
 
     submit_response = client.post(
         "/experiments", json={"algorithm": "grover", "marked_states": ["101"]}
@@ -152,6 +136,7 @@ def test_get_experiment_by_id(client: TestClient, monkeypatch: pytest.MonkeyPatc
 
     assert get_response.status_code == 200
     assert get_response.json()["id"] == experiment_id
+    assert get_response.json()["status"] == "queued"
 
 
 def test_get_experiment_not_found(client: TestClient) -> None:
@@ -161,10 +146,10 @@ def test_get_experiment_not_found(client: TestClient) -> None:
 
 
 def test_list_experiments(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_run_grover(backend, request):
-        return {"counts": {}}
+    async def fake_publish_task(task):
+        pass
 
-    monkeypatch.setattr(execution, "run_grover", fake_run_grover)
+    monkeypatch.setattr(deps, "publish_task", fake_publish_task)
 
     client.post("/experiments", json={"algorithm": "grover", "marked_states": ["101"]})
     client.post("/experiments", json={"algorithm": "grover", "marked_states": ["110"]})

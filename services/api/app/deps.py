@@ -1,6 +1,7 @@
 """
-FastAPI dependencies: a shared QuantumBackend instance and an in-memory
-experiment store.
+FastAPI dependencies: a shared QuantumBackend instance, an in-memory
+experiment store, and the RabbitMQ connection used to enqueue experiments
+for the orchestrator.
 
 The in-memory store is a deliberate, temporary simplification -- it won't
 survive a process restart and won't work correctly if the API is ever run
@@ -15,6 +16,7 @@ import threading
 from datetime import datetime, timezone
 
 from quantum_core.backends.base import QuantumBackend
+from quantum_core.tasks import RESULTS_QUEUE_NAME, TASK_QUEUE_NAME, ExperimentTask
 
 from app.schemas.experiments import ExperimentResponse
 
@@ -24,20 +26,18 @@ _backend: QuantumBackend | None = None
 def get_backend() -> QuantumBackend:
     """A single shared AerBackend instance for the process lifetime.
 
+    Currently unused by the experiments router itself -- execution moved to
+    the orchestrator once the RabbitMQ queue was introduced (see
+    routers/experiments.py) -- but kept available for anything that might
+    want direct in-process execution later (a debug/sync-mode endpoint,
+    tests, etc.).
+
     The import is deliberately local to this function, not at module level:
     `app.deps` is imported by nearly everything in this service (routers,
     tests), and an eager `from quantum_core.backends.aer_backend import
     AerBackend` at module level would mean *anything* touching `app.deps` --
     including tests that only care about `ExperimentStore`'s pure-Python
     logic -- transitively requires qiskit/qiskit-aer to be importable.
-    Deferring the import to call time decouples "can I import this module"
-    from "do I need a real quantum backend", which is exactly what API-layer
-    unit tests want (see tests/README or docs/testing.md).
-
-    Kept as a plain module-level singleton rather than FastAPI's
-    `lifespan`-managed state for now, to keep this first version simple --
-    revisit if/when the API needs to support multiple backend types
-    selectable per request (mock vs. Aer vs., eventually, real hardware).
     """
     global _backend
     if _backend is None:
@@ -50,10 +50,11 @@ def get_backend() -> QuantumBackend:
 class ExperimentStore:
     """Thread-safe in-memory store, keyed by experiment id.
 
-    Thread safety matters here specifically because of VQE: its endpoint
-    runs in a threadpool worker thread (see routers/experiments.py), not
-    on the main event loop thread, so store access from that path is
-    genuinely concurrent with the main thread, unlike the async endpoints.
+    The lock is cheap insurance: the results-queue consumer (see
+    app/main.py's `consume_results`) writes to this store from a background
+    asyncio task, and nothing rules out a future sync/threaded write path
+    reappearing (as VQE's did, briefly, before execution moved entirely to
+    the orchestrator).
     """
 
     def __init__(self) -> None:
@@ -82,3 +83,57 @@ def get_store() -> ExperimentStore:
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# --- RabbitMQ ---------------------------------------------------------
+#
+# Connection/channel are process-lifetime singletons, set up once via
+# `init_rabbitmq` (called from app/main.py's lifespan on startup) and torn
+# down via `close_rabbitmq` on shutdown. `app.deps` stays the single place
+# that owns this state -- routers only ever call `publish_task`, never
+# touch aio-pika directly.
+
+_rabbitmq_connection = None  # aio_pika.abc.AbstractRobustConnection | None
+_rabbitmq_channel = None  # aio_pika.abc.AbstractChannel | None
+
+
+async def init_rabbitmq(url: str) -> None:
+    global _rabbitmq_connection, _rabbitmq_channel
+    import aio_pika
+
+    _rabbitmq_connection = await aio_pika.connect_robust(url)
+    _rabbitmq_channel = await _rabbitmq_connection.channel()
+    # Declared here (not left solely to the orchestrator) so the API can
+    # publish successfully even if the orchestrator hasn't started yet --
+    # whichever side starts first creates the queue.
+    await _rabbitmq_channel.declare_queue(TASK_QUEUE_NAME, durable=True)
+    await _rabbitmq_channel.declare_queue(RESULTS_QUEUE_NAME, durable=True)
+
+
+async def close_rabbitmq() -> None:
+    global _rabbitmq_connection
+    if _rabbitmq_connection is not None:
+        await _rabbitmq_connection.close()
+        _rabbitmq_connection = None
+
+
+def get_rabbitmq_channel():
+    if _rabbitmq_channel is None:
+        raise RuntimeError(
+            "RabbitMQ channel not initialized -- init_rabbitmq() must run first "
+            "(normally via app.main's lifespan on startup)"
+        )
+    return _rabbitmq_channel
+
+
+async def publish_task(task: ExperimentTask) -> None:
+    import aio_pika
+
+    channel = get_rabbitmq_channel()
+    await channel.default_exchange.publish(
+        aio_pika.Message(
+            body=task.to_json().encode(),
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+        ),
+        routing_key=TASK_QUEUE_NAME,
+    )

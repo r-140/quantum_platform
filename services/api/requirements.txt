@@ -7,6 +7,7 @@
 
 fastapi>=0.110
 uvicorn[standard]>=0.29
+aio-pika>=9.4
 
 # Dev/test
 pytest>=8.0

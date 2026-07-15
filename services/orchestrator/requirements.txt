@@ -1,0 +1,7 @@
+# Runtime dependencies for the orchestrator worker.
+-e ../quantum-core
+
+aio-pika>=9.4
+
+# Dev/test
+pytest>=8.0

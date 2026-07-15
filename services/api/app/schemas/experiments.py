@@ -64,9 +64,11 @@ class VQERequest(BaseModel):
     """Finds the H2 ground-state energy via the classical-quantum feedback
     loop. See quantum_core/loops/vqe_loop.py.
 
-    Runs synchronously inside a threadpool (see app/execution.py) -- this
-    is the slowest of the four algorithms by a wide margin (many circuit
-    submissions per optimizer iteration).
+    Executed by the orchestrator, not this API process -- it's the slowest
+    of the four algorithms by a wide margin (many circuit submissions per
+    optimizer iteration), which is exactly why it goes through the queue
+    like everything else rather than needing special handling here (see
+    docs/architecture/orchestration.md).
     """
 
     algorithm: Literal["vqe"] = "vqe"
@@ -81,6 +83,7 @@ ExperimentRequest = Annotated[
 
 
 class ExperimentStatus(str, Enum):
+    QUEUED = "queued"
     COMPLETED = "completed"
     FAILED = "failed"
 

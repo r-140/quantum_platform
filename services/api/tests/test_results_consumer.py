@@ -1,0 +1,81 @@
+"""
+Tests for `app.main.apply_result_message` -- the pure store-update logic
+behind the results-queue consumer, tested directly without any aio-pika
+involvement (constructing a real queue/message for this would be an
+integration test, not a unit test; see docs/testing.md).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from app.deps import ExperimentStore
+from app.main import apply_result_message
+from app.schemas.experiments import ExperimentResponse, ExperimentStatus
+from quantum_core.tasks import ExperimentResultMessage
+
+
+def _queued_experiment(experiment_id: str) -> ExperimentResponse:
+    return ExperimentResponse(
+        id=experiment_id,
+        algorithm="grover",
+        status=ExperimentStatus.QUEUED,
+        submitted_at=datetime.now(timezone.utc),
+    )
+
+
+def test_completed_result_updates_store() -> None:
+    store = ExperimentStore()
+    store.save(_queued_experiment("abc"))
+
+    result_msg = ExperimentResultMessage(
+        experiment_id="abc", status="completed", result={"counts": {"101": 970}}
+    )
+    apply_result_message(result_msg, store)
+
+    updated = store.get("abc")
+    assert updated.status == ExperimentStatus.COMPLETED
+    assert updated.result == {"counts": {"101": 970}}
+    assert updated.error is None
+    assert updated.completed_at is not None
+
+
+def test_failed_result_updates_store() -> None:
+    store = ExperimentStore()
+    store.save(_queued_experiment("abc"))
+
+    result_msg = ExperimentResultMessage(experiment_id="abc", status="failed", error="circuit error")
+    apply_result_message(result_msg, store)
+
+    updated = store.get("abc")
+    assert updated.status == ExperimentStatus.FAILED
+    assert updated.error == "circuit error"
+    assert updated.result is None
+
+
+def test_unknown_experiment_id_is_ignored_not_raised() -> None:
+    """A result for an id the store doesn't know about (e.g. from an
+    experiment submitted to a previous API process instance, since the
+    store doesn't survive restarts) should be silently ignored -- not raise,
+    which would crash the whole results-consumer loop over one stale
+    message.
+    """
+    store = ExperimentStore()
+
+    result_msg = ExperimentResultMessage(experiment_id="does-not-exist", status="completed", result={})
+
+    apply_result_message(result_msg, store)  # should not raise
+
+    assert store.get("does-not-exist") is None
+
+
+def test_original_submitted_at_is_preserved() -> None:
+    store = ExperimentStore()
+    original = _queued_experiment("abc")
+    store.save(original)
+
+    apply_result_message(
+        ExperimentResultMessage(experiment_id="abc", status="completed", result={}), store
+    )
+
+    assert store.get("abc").submitted_at == original.submitted_at

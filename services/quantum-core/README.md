@@ -26,8 +26,10 @@ quantum-core/
     │   ├── qft.py                # QFT / inverse-QFT (переиспользуемый примитив)
     │   ├── qpe.py                # Quantum Phase Estimation
     │   └── vqe.py                 # VQE: гамильтониан H2, ansatz, измерения по термам
-    └── loops/
-        └── vqe_loop.py             # замкнутый classical-quantum feedback loop
+    ├── loops/
+    │   └── vqe_loop.py             # замкнутый classical-quantum feedback loop
+    ├── execution.py                 # общая логика "запусти этот алгоритм" -- используется api и orchestrator
+    └── tasks.py                     # сообщения очереди (ExperimentTask/ExperimentResultMessage)
 
 tests/unit/
 ├── conftest.py                     # fixture fake_clock (без реального ожидания)
@@ -231,6 +233,27 @@ loop. Из-за этого `demo_vqe.py` — единственное демо, 
 Hartree (близко к литературному `-1.137`), с логом сходимости по
 итерациям. Медленнее предыдущих демо — до 5 отправок схем на итерацию,
 десятки итераций COBYLA.
+
+### `quantum_core/execution.py`
+Общая бизнес-логика "запусти этот алгоритм" — по одной функции на каждый
+алгоритм (`run_grover`, `run_sat_grover`, `run_qpe`, `run_vqe_sync`),
+принимающие простые Python-типы (списки, строки, числа), а не Pydantic
+или другие framework-specific объекты. Появился при переходе на
+оркестрацию через RabbitMQ (см. `docs/architecture/orchestration.md`) —
+раньше эта логика жила прямо в `services/api/app/execution.py` и была
+привязана к Pydantic-схемам API; теперь и `api`, и `orchestrator`
+пользуются одним и тем же кодом, каждый со своим тонким адаптером поверх
+него (HTTP-запрос → простые типы для api; JSON-сообщение очереди →
+простые типы для orchestrator).
+
+### `quantum_core/tasks.py`
+Формат сообщений очереди — `ExperimentTask` (публикует `api`, читает
+`orchestrator`) и `ExperimentResultMessage` (наоборот). Простые
+`dataclass` с `to_json()`/`from_json()`, без Pydantic — чтобы не тащить
+HTTP-фреймворк в `quantum_core`. Единственный файл в этом проекте, который
+я реально прогнал и проверил (round-trip сериализации, включая
+failure-случай) именно в контексте оркестрации — чистый stdlib, без
+внешних зависимостей.
 
 ### `demo_aer.py`
 Прогоняет Bell-состояние (`H` + `CX` на 2 кубитах) через `AerBackend` и

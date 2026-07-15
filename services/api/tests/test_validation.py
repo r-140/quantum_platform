@@ -5,7 +5,7 @@ directly, so these tests also confirm FastAPI surfaces validation errors as
 422 responses rather than raw exceptions, and that the discriminated union
 in `ExperimentRequest` correctly rejects malformed/mismatched payloads.
 
-None of these hit `app.execution` -- validation happens before the router
+None of these hit `app.deps.publish_task` -- validation happens before the router
 body even runs, so there's nothing to monkeypatch here.
 """
 
@@ -58,16 +58,16 @@ def test_qpe_phi_out_of_range_returns_422(client: TestClient) -> None:
 
 
 def test_qpe_phi_at_lower_bound_is_valid(client: TestClient, monkeypatch) -> None:
-    from app import execution
+    from app import deps
 
-    async def fake_run_qpe(backend, request):
-        return {"true_phi": request.phi}
+    async def fake_publish_task(task):
+        pass
 
-    monkeypatch.setattr(execution, "run_qpe", fake_run_qpe)
+    monkeypatch.setattr(deps, "publish_task", fake_publish_task)
 
     response = client.post("/experiments", json={"algorithm": "qpe", "phi": 0.0})
 
-    assert response.status_code == 200
+    assert response.status_code == 202
 
 
 def test_sat_grover_too_many_variables_returns_422(client: TestClient) -> None:
