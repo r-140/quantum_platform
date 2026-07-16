@@ -61,8 +61,14 @@ cd services/orchestrator
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python3 app/worker.py
+python3 -m app.worker
 ```
+
+⚠️ Именно `python3 -m app.worker`, не `python3 app/worker.py` — второе
+падает с `ModuleNotFoundError: No module named 'app'`, потому что
+`worker.py` использует абсолютный импорт (`from app import retry_policy`),
+которому нужен `services/orchestrator/` (родитель `app/`) на `sys.path`.
+`-m` добавляет его туда автоматически; прямой запуск файла — нет.
 
 Переменная окружения `RABBITMQ_URL` (по умолчанию
 `amqp://guest:guest@localhost/`) — если RabbitMQ не на localhost/не с

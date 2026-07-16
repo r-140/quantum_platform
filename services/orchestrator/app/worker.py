@@ -27,7 +27,14 @@ for the third:
    concern from `quantum_core.sync.polling`'s backend-level retry/backoff.
 
 Run with (from services/orchestrator/):
-    python app/worker.py
+    python3 -m app.worker
+
+Not `python3 app/worker.py` -- this module uses an absolute import
+(`from app import retry_policy`), which requires `app` to be importable as
+a package. Running as `python3 -m app.worker` puts `services/orchestrator/`
+(the parent of `app/`) on sys.path automatically; running the file
+directly only puts `app/` itself there, so `import app` fails with
+`ModuleNotFoundError: No module named 'app'`.
 """
 
 from __future__ import annotations
