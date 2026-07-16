@@ -1,8 +1,16 @@
 """
 Orchestrator worker: consumes ExperimentTask messages from RabbitMQ,
-executes them via quantum_core.execution (the same functions the API used
-to call directly before this queue existed), and publishes an
-ExperimentResultMessage back so the API can update its store.
+executes them via app.tasks.run_experiment (which calls quantum_core.execution
+-- the same functions the API used to call directly before this queue
+existed), and publishes an ExperimentResultMessage back so the API can
+update its store. Also launches a periodic calibration cycle
+(app.tasks.calibration) as a background task alongside task processing.
+
+This module itself is deliberately thin -- just RabbitMQ connection setup
+and the consume loop. Dispatch logic lives in app/tasks/run_experiment.py,
+retry/dead-letter policy lives in app/retry_policy.py, and calibration
+lives in app/tasks/calibration.py -- each independently testable without
+needing a real RabbitMQ connection.
 
 Three distinct failure modes, handled differently -- see retry_policy.py
 for the third:
@@ -29,12 +37,12 @@ for the third:
 Run with (from services/orchestrator/):
     python3 -m app.worker
 
-Not `python3 app/worker.py` -- this module uses an absolute import
-(`from app import retry_policy`), which requires `app` to be importable as
-a package. Running as `python3 -m app.worker` puts `services/orchestrator/`
-(the parent of `app/`) on sys.path automatically; running the file
-directly only puts `app/` itself there, so `import app` fails with
-`ModuleNotFoundError: No module named 'app'`.
+Not `python3 app/worker.py` -- this module uses absolute imports (`from
+app import retry_policy`, `from app.tasks import ...`), which require
+`app` to be importable as a package. Running as `python3 -m app.worker`
+puts `services/orchestrator/` (the parent of `app/`) on sys.path
+automatically; running the file directly only puts `app/` itself there, so
+`import app` fails with `ModuleNotFoundError: No module named 'app'`.
 """
 
 from __future__ import annotations
@@ -48,60 +56,17 @@ from aio_pika.abc import AbstractIncomingMessage
 
 from quantum_core.backends.aer_backend import AerBackend
 from quantum_core.backends.base import QuantumBackend
-from quantum_core.execution import run_grover, run_qpe, run_sat_grover, run_vqe_sync
 from quantum_core.tasks import RESULTS_QUEUE_NAME, TASK_QUEUE_NAME, ExperimentResultMessage, ExperimentTask
 
 from app import retry_policy
+from app.tasks.calibration import run_calibration_loop
+from app.tasks.run_experiment import execute_task
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("orchestrator")
 
 RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost/")
-
-
-async def execute_task(backend: QuantumBackend, task: ExperimentTask) -> dict:
-    """Dispatches to the right quantum_core.execution function based on
-    `task.algorithm`. Mirrors services/api/app/execution.py's dispatch,
-    but unpacking a plain dict (`task.params`) instead of a Pydantic
-    request object -- both are thin adapters around the same
-    quantum_core.execution functions, by design (see that module's
-    docstring).
-    """
-    params = task.params
-
-    if task.algorithm == "grover":
-        return await run_grover(backend, params["marked_states"], shots=params.get("shots", 1024))
-
-    if task.algorithm == "sat_grover":
-        return await run_sat_grover(
-            backend, params["variables"], params["expression"], shots=params.get("shots", 1024)
-        )
-
-    if task.algorithm == "qpe":
-        return await run_qpe(
-            backend,
-            params["phi"],
-            num_counting_qubits=params.get("num_counting_qubits", 3),
-            shots=params.get("shots", 1024),
-        )
-
-    if task.algorithm == "vqe":
-        # run_vqe_sync is synchronous by design (see quantum_core.execution
-        # for why) -- offload to a thread via run_in_executor, the plain
-        # asyncio equivalent of Starlette's run_in_threadpool used on the
-        # API side for the same reason. Without this, a VQE task would
-        # block this worker's event loop for its entire ~1 minute runtime,
-        # stalling every other queued task behind it.
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None,
-            run_vqe_sync,
-            backend,
-            params.get("shots", 8192),
-            params.get("max_iterations", 80),
-        )
-
-    raise ValueError(f"unknown algorithm {task.algorithm!r}")
+CALIBRATION_INTERVAL_S = float(os.environ.get("CALIBRATION_INTERVAL_S", "300"))
 
 
 async def handle_message(
@@ -163,21 +128,32 @@ async def main() -> None:
         # reserved/automatic, not something a client is allowed to do).
         await channel.declare_queue(RESULTS_QUEUE_NAME, durable=True)
 
+        calibration_task = asyncio.create_task(
+            run_calibration_loop(backend, channel, interval_s=CALIBRATION_INTERVAL_S)
+        )
+
         logger.info("orchestrator started, waiting for tasks on %r", TASK_QUEUE_NAME)
 
-        async with task_queue.iterator() as queue_iter:
-            async for message in queue_iter:
-                should_process = await retry_policy.handle_redelivery(
-                    channel, message, TASK_QUEUE_NAME
-                )
-                if not should_process:
-                    # retry_policy already either republished a retry copy
-                    # or routed this to the dead-letter queue -- remove the
-                    # original from the main queue either way.
-                    await message.ack()
-                    continue
+        try:
+            async with task_queue.iterator() as queue_iter:
+                async for message in queue_iter:
+                    should_process = await retry_policy.handle_redelivery(
+                        channel, message, TASK_QUEUE_NAME
+                    )
+                    if not should_process:
+                        # retry_policy already either republished a retry
+                        # copy or routed this to the dead-letter queue --
+                        # remove the original from the main queue either way.
+                        await message.ack()
+                        continue
 
-                await handle_message(message, backend, channel)
+                    await handle_message(message, backend, channel)
+        finally:
+            calibration_task.cancel()
+            try:
+                await calibration_task
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":
