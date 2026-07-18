@@ -4,10 +4,13 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+.idea
 
 # Env files
 .env
 
 # OS
 .DS_Store
-.idea
+
+# dev.sh logs
+.dev-logs/

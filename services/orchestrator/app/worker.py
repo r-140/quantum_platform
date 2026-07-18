@@ -65,6 +65,14 @@ from app.tasks.run_experiment import execute_task
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("orchestrator")
 
+# Qiskit's transpiler logs one INFO line per optimization pass (very
+# verbose -- dozens of lines per circuit) at the same log level as our own
+# operational logs. Silencing it to WARNING keeps `processing
+# experiment_id=...` / `calibration cycle: ...` visible in the log instead
+# of buried under transpiler internals; doesn't affect Qiskit's actual
+# behavior, only how much it prints.
+logging.getLogger("qiskit").setLevel(logging.WARNING)
+
 RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost/")
 CALIBRATION_INTERVAL_S = float(os.environ.get("CALIBRATION_INTERVAL_S", "300"))
 
