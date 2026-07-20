@@ -1,8 +1,9 @@
 """
 FastAPI application entry point.
 
-Run with (from services/api/, and with RabbitMQ running -- see root
-docker-compose.yml):
+Run with (from services/api/, and with RabbitMQ + Postgres running -- see
+root docker-compose.yml, and docs/architecture/postgres.md for running
+Alembic migrations first):
     uvicorn app.main:app --reload --port 8000
 
 Then either use the interactive docs at http://localhost:8000/docs, or:
@@ -21,27 +22,32 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.deps import ExperimentStore, close_rabbitmq, get_rabbitmq_channel, get_store, init_rabbitmq, utcnow
+from app.db import close_db, init_db
+from app.deps import close_rabbitmq, get_rabbitmq_channel, get_store, init_rabbitmq, utcnow
 from app.routers import backends, experiments
 from app.schemas.experiments import ExperimentStatus
+from app.store.base import ExperimentStore
 from quantum_core.tasks import RESULTS_QUEUE_NAME, ExperimentResultMessage
 
 logger = logging.getLogger("api")
 
 RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost/")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
-def apply_result_message(result_msg: ExperimentResultMessage, store: ExperimentStore) -> None:
+async def apply_result_message(result_msg: ExperimentResultMessage, store: ExperimentStore) -> None:
     """Updates `store` for a single result message -- pulled out of
     `consume_results` so it's testable directly (constructing a real
     aio-pika message/queue iterator in a unit test is not worth the
     trouble; this function has no aio-pika dependency at all).
     """
-    existing = store.get(result_msg.experiment_id)
+    existing = await store.get(result_msg.experiment_id)
     if existing is None:
         # Unknown id -- e.g. a result for an experiment submitted to a
-        # *previous* instance of this API process (the in-memory store
-        # doesn't survive restarts; see app/deps.py). Nothing to update.
+        # *previous* instance of this API process while using the
+        # in-memory store fallback (doesn't survive restarts; see
+        # app/deps.py). With Postgres configured this shouldn't happen in
+        # practice. Nothing to update either way.
         logger.warning("received result for unknown experiment_id=%s", result_msg.experiment_id)
         return
 
@@ -55,7 +61,7 @@ def apply_result_message(result_msg: ExperimentResultMessage, store: ExperimentS
             "error": result_msg.error,
         }
     )
-    store.save(updated)
+    await store.save(updated)
     logger.info("experiment_id=%s updated to status=%s", result_msg.experiment_id, updated.status)
 
 
@@ -78,11 +84,19 @@ async def consume_results() -> None:
         async for message in queue_iter:
             async with message.process():
                 result_msg = ExperimentResultMessage.from_json(message.body.decode())
-                apply_result_message(result_msg, store)
+                await apply_result_message(result_msg, store)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if DATABASE_URL:
+        await init_db(DATABASE_URL)
+    else:
+        logger.warning(
+            "DATABASE_URL not set -- falling back to in-memory experiment store "
+            "(won't survive a restart; see app/deps.py)"
+        )
+
     await init_rabbitmq(RABBITMQ_URL)
     consumer_task = asyncio.create_task(consume_results())
     try:
@@ -94,6 +108,8 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         await close_rabbitmq()
+        if DATABASE_URL:
+            await close_db()
 
 
 app = FastAPI(
@@ -101,8 +117,9 @@ app = FastAPI(
     description="Accepts quantum experiment requests (Grover, SAT-Grover, QPE, VQE), "
     "enqueues them to RabbitMQ, and returns immediately with status=queued. "
     "The orchestrator service consumes the queue, executes against a "
-    "QuantumBackend, and publishes results back for this API to pick up.",
-    version="0.2.0",
+    "QuantumBackend, and publishes results back for this API to pick up. "
+    "Experiment metadata is persisted to Postgres when DATABASE_URL is set.",
+    version="0.3.0",
     lifespan=lifespan,
 )
 

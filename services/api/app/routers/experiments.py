@@ -25,12 +25,13 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 
 from app import deps
-from app.deps import ExperimentStore, get_store, utcnow
+from app.deps import get_store, utcnow
 from app.schemas.experiments import (
     ExperimentRequest,
     ExperimentResponse,
     ExperimentStatus,
 )
+from app.store.base import ExperimentStore
 from quantum_core.tasks import ExperimentTask
 
 router = APIRouter(prefix="/experiments", tags=["experiments"])
@@ -55,7 +56,7 @@ async def submit_experiment(
         status=ExperimentStatus.QUEUED,
         submitted_at=submitted_at,
     )
-    store.save(response)
+    await store.save(response)
 
     task = ExperimentTask(
         experiment_id=experiment_id,
@@ -78,7 +79,7 @@ async def submit_experiment(
             completed_at=utcnow(),
             error=f"failed to enqueue: {exc}",
         )
-        store.save(response)
+        await store.save(response)
 
     return response
 
@@ -87,7 +88,7 @@ async def submit_experiment(
 async def get_experiment(
     experiment_id: str, store: ExperimentStore = Depends(get_store)
 ) -> ExperimentResponse:
-    experiment = store.get(experiment_id)
+    experiment = await store.get(experiment_id)
     if experiment is None:
         raise HTTPException(status_code=404, detail="experiment not found")
     return experiment
@@ -95,4 +96,4 @@ async def get_experiment(
 
 @router.get("", response_model=list[ExperimentResponse])
 async def list_experiments(store: ExperimentStore = Depends(get_store)) -> list[ExperimentResponse]:
-    return store.list_all()
+    return await store.list_all()

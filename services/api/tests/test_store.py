@@ -1,20 +1,16 @@
 """
-Direct tests for `ExperimentStore` -- no HTTP layer, no FastAPI app import.
-
-Thanks to `app.deps.get_backend`'s lazy import (see that function's
-docstring), importing `app.deps` here does NOT require qiskit/qiskit-aer to
-be installed -- only pydantic (for `ExperimentResponse`, which the store
-holds). If this file starts failing to import with a qiskit-related error,
-that's a sign the lazy-import discipline in deps.py has regressed.
+Direct tests for `InMemoryExperimentStore` -- no HTTP layer, no FastAPI app
+import needed (though `conftest.py`'s autouse fixture will still import it;
+these tests just don't use `client`).
 """
 
 from __future__ import annotations
 
-import threading
+import asyncio
 from datetime import datetime, timezone
 
-from app.deps import ExperimentStore
 from app.schemas.experiments import ExperimentResponse, ExperimentStatus
+from app.store.in_memory import InMemoryExperimentStore
 
 
 def _make_response(experiment_id: str) -> ExperimentResponse:
@@ -26,60 +22,54 @@ def _make_response(experiment_id: str) -> ExperimentResponse:
     )
 
 
-def test_save_and_get() -> None:
-    store = ExperimentStore()
+async def test_save_and_get() -> None:
+    store = InMemoryExperimentStore()
     response = _make_response("abc")
 
-    store.save(response)
+    await store.save(response)
 
-    assert store.get("abc") == response
-
-
-def test_get_missing_returns_none() -> None:
-    store = ExperimentStore()
-    assert store.get("does-not-exist") is None
+    assert await store.get("abc") == response
 
 
-def test_list_all() -> None:
-    store = ExperimentStore()
-    store.save(_make_response("a"))
-    store.save(_make_response("b"))
+async def test_get_missing_returns_none() -> None:
+    store = InMemoryExperimentStore()
+    assert await store.get("does-not-exist") is None
 
-    ids = {experiment.id for experiment in store.list_all()}
+
+async def test_list_all() -> None:
+    store = InMemoryExperimentStore()
+    await store.save(_make_response("a"))
+    await store.save(_make_response("b"))
+
+    ids = {experiment.id for experiment in await store.list_all()}
 
     assert ids == {"a", "b"}
 
 
-def test_save_overwrites_existing_id() -> None:
-    store = ExperimentStore()
-    store.save(_make_response("abc"))
+async def test_save_overwrites_existing_id() -> None:
+    store = InMemoryExperimentStore()
+    await store.save(_make_response("abc"))
     updated = _make_response("abc")
 
-    store.save(updated)
+    await store.save(updated)
 
-    assert store.get("abc") == updated
-    assert len(store.list_all()) == 1
+    assert await store.get("abc") == updated
+    assert len(await store.list_all()) == 1
 
 
-def test_concurrent_saves_are_thread_safe() -> None:
-    """Hammers the store from many threads at once. This specifically
-    matters because the VQE endpoint writes to the store from a threadpool
-    worker thread, not the main event-loop thread (see
-    routers/experiments.py and its use of `run_in_threadpool`) -- so store
-    access is genuinely concurrent in a way it wouldn't be for a purely
-    async-only service. A missing or incorrect lock would show up here as
-    lost writes (final count < n), not as an obvious crash.
+async def test_concurrent_saves_do_not_lose_writes() -> None:
+    """Hammers the store from many concurrent coroutines at once. Uses
+    `asyncio.gather` (concurrent tasks on the same event loop), not threads
+    -- consistent with the store now being asyncio.Lock-based rather than
+    threading.Lock-based (see in_memory.py: nothing writes to this store
+    from a different OS thread anymore, now that VQE execution moved
+    entirely to the orchestrator and no longer needs `run_in_threadpool`
+    on the API side). A missing/incorrect lock would show up here as lost
+    writes (final count < n).
     """
-    store = ExperimentStore()
+    store = InMemoryExperimentStore()
     n = 200
 
-    def worker(i: int) -> None:
-        store.save(_make_response(str(i)))
+    await asyncio.gather(*(store.save(_make_response(str(i))) for i in range(n)))
 
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert len(store.list_all()) == n
+    assert len(await store.list_all()) == n

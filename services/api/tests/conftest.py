@@ -1,17 +1,21 @@
 """
 Shared fixtures for the API test suite.
 
-Importing `app.main` (needed for TestClient) pulls in the full router ->
-execution -> quantum_core.algorithms chain, which requires qiskit/qiskit-aer
-to be installed -- even though the tests here monkeypatch execution
-functions to avoid ever *running* a real circuit. That's an acceptable
-trade-off: qiskit is already a mandatory dependency of this service (see
-requirements.txt), so requiring it to be importable for the test suite
-doesn't add a new constraint, and the alternative (lazily importing inside
-every execution.py function) would meaningfully hurt readability of the
-actual business logic for a benefit that only matters for test isolation.
-Contrast this with `app.deps.get_backend`, where the lazy-import fix *was*
-worth it -- see that module's docstring.
+Uses FastAPI's `app.dependency_overrides` to swap in a fresh
+`InMemoryExperimentStore` per test, rather than monkeypatching a module-level
+singleton (the approach used before the storage abstraction existed) --
+this is the idiomatic FastAPI pattern for swapping out a `Depends(...)`
+dependency in tests, and it means the test suite never touches
+`app.deps.get_store`'s real branching logic (Postgres vs. in-memory) at all.
+
+Note on qiskit: importing `app.main` here does NOT require qiskit/qiskit-aer
+to be importable. That wasn't always true -- an earlier version of this
+service had a `routers/experiments.py` that called straight into
+`quantum_core.algorithms.*` to execute circuits in-process. Since execution
+moved to the orchestrator (see docs/architecture/orchestration.md), nothing
+on the API's import path touches qiskit at module level; `app.deps.get_backend`
+lazily imports `AerBackend` only if called, and nothing in this test suite
+calls it.
 """
 
 from __future__ import annotations
@@ -19,23 +23,27 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-import app.deps as deps_module
-from app.deps import ExperimentStore
+from app.deps import get_store
 from app.main import app
+from app.store.in_memory import InMemoryExperimentStore
+
+
+@pytest.fixture
+def store() -> InMemoryExperimentStore:
+    return InMemoryExperimentStore()
 
 
 @pytest.fixture(autouse=True)
-def fresh_store(monkeypatch: pytest.MonkeyPatch) -> ExperimentStore:
-    """Replaces the module-level `_store` singleton with a fresh, empty
-    instance for every test. Without this, experiments saved by one test
-    would leak into the next (the store is a plain module global, shared
-    across the whole process) -- `test_list_experiments` would then have a
-    count that depends on what ran before it, which is exactly the kind of
-    order-dependent flakiness a test suite shouldn't have.
+def override_store(store: InMemoryExperimentStore):
+    """Overrides the `get_store` dependency for every test in this suite,
+    so each test gets its own fresh, empty store -- without this, experiments
+    saved by one test would leak into the next (FastAPI's dependency
+    overrides are otherwise shared across the whole `app` object, same as
+    the store singleton this replaced).
     """
-    fresh = ExperimentStore()
-    monkeypatch.setattr(deps_module, "_store", fresh)
-    return fresh
+    app.dependency_overrides[get_store] = lambda: store
+    yield
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture

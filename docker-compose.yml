@@ -1,9 +1,9 @@
-# Local infrastructure for the quantum platform. Currently just RabbitMQ --
-# Postgres/TimescaleDB/MinIO/Kafka will be added here as the project grows
-# into them (see docs/architecture/orchestration.md for the current plan).
+# Local infrastructure for the quantum platform: RabbitMQ (task queue) and
+# Postgres (experiment metadata). Kafka/TimescaleDB/MinIO will be added
+# here as the project grows into them -- see docs/architecture/deferred-work.md.
 #
 # Run with: docker compose up -d
-# Management UI: http://localhost:15672 (guest/guest)
+# RabbitMQ management UI: http://localhost:15672 (guest/guest)
 
 services:
   rabbitmq:
@@ -23,5 +23,23 @@ services:
       timeout: 5s
       retries: 5
 
+  postgres:
+    image: postgres:16
+    container_name: quantum-platform-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: quantum
+      POSTGRES_PASSWORD: quantum
+      POSTGRES_DB: quantum_platform
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quantum"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
   rabbitmq-data:
+  postgres-data:

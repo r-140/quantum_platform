@@ -1,24 +1,19 @@
 """
-FastAPI dependencies: a shared QuantumBackend instance, an in-memory
-experiment store, and the RabbitMQ connection used to enqueue experiments
-for the orchestrator.
-
-The in-memory store is a deliberate, temporary simplification -- it won't
-survive a process restart and won't work correctly if the API is ever run
-with multiple worker processes (each would have its own store). This is
-exactly the gap Postgres (for experiment metadata) is meant to fill once
-the storage layer is added; nothing here pretends otherwise.
+FastAPI dependencies: a shared QuantumBackend instance, the experiment
+store (Postgres-backed if DATABASE_URL is set, in-memory otherwise), and
+the RabbitMQ connection used to enqueue experiments for the orchestrator.
 """
 
 from __future__ import annotations
 
-import threading
+import os
 from datetime import datetime, timezone
 
 from quantum_core.backends.base import QuantumBackend
 from quantum_core.tasks import RESULTS_QUEUE_NAME, TASK_QUEUE_NAME, ExperimentTask
 
-from app.schemas.experiments import ExperimentResponse
+from app.store.base import ExperimentStore
+from app.store.in_memory import InMemoryExperimentStore
 
 _backend: QuantumBackend | None = None
 
@@ -36,8 +31,8 @@ def get_backend() -> QuantumBackend:
     `app.deps` is imported by nearly everything in this service (routers,
     tests), and an eager `from quantum_core.backends.aer_backend import
     AerBackend` at module level would mean *anything* touching `app.deps` --
-    including tests that only care about `ExperimentStore`'s pure-Python
-    logic -- transitively requires qiskit/qiskit-aer to be importable.
+    including tests that only care about pure-Python store logic --
+    transitively requires qiskit/qiskit-aer to be importable.
     """
     global _backend
     if _backend is None:
@@ -47,38 +42,34 @@ def get_backend() -> QuantumBackend:
     return _backend
 
 
-class ExperimentStore:
-    """Thread-safe in-memory store, keyed by experiment id.
+# --- Experiment store ---------------------------------------------------
+#
+# Postgres-backed if DATABASE_URL is set (the normal case, once Postgres is
+# running -- see app/main.py's lifespan, which calls init_db before this is
+# ever used for real requests); falls back to an in-memory store otherwise,
+# which is what keeps `pytest tests/` fast and dependency-free -- tests
+# override this dependency entirely via FastAPI's `app.dependency_overrides`
+# (see tests/conftest.py) rather than relying on this fallback, but it's
+# also what a bare `uvicorn app.main:app` run would silently use if
+# DATABASE_URL were unset and init_db were skipped -- a state worth being
+# loud about, not falling into quietly (see main.py's lifespan, which logs
+# a warning in that case).
 
-    The lock is cheap insurance: the results-queue consumer (see
-    app/main.py's `consume_results`) writes to this store from a background
-    asyncio task, and nothing rules out a future sync/threaded write path
-    reappearing (as VQE's did, briefly, before execution moved entirely to
-    the orchestrator).
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._data: dict[str, ExperimentResponse] = {}
-
-    def save(self, experiment: ExperimentResponse) -> None:
-        with self._lock:
-            self._data[experiment.id] = experiment
-
-    def get(self, experiment_id: str) -> ExperimentResponse | None:
-        with self._lock:
-            return self._data.get(experiment_id)
-
-    def list_all(self) -> list[ExperimentResponse]:
-        with self._lock:
-            return list(self._data.values())
-
-
-_store = ExperimentStore()
+_fallback_store: ExperimentStore | None = None
 
 
 def get_store() -> ExperimentStore:
-    return _store
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        from app.db import get_sessionmaker
+        from app.store.postgres import PostgresExperimentStore
+
+        return PostgresExperimentStore(get_sessionmaker())
+
+    global _fallback_store
+    if _fallback_store is None:
+        _fallback_store = InMemoryExperimentStore()
+    return _fallback_store
 
 
 def utcnow() -> datetime:
