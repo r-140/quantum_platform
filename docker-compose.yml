@@ -40,6 +40,43 @@ services:
       timeout: 5s
       retries: 5
 
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: quantum-platform-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft mode (no Zookeeper): this single container acts as both
+      # broker and controller -- the modern, simpler way to run Kafka for
+      # local development (Zookeeper-based setups are legacy as of
+      # Kafka 3.x+/Confluent Platform 7.5+).
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Replication factor 1 everywhere -- single-broker dev setup, not
+      # meant to survive broker loss. Production would use >=3.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # A fixed, valid KRaft cluster ID -- any base64-encoded 16-byte UUID
+      # works; this specific value is the widely-used example ID from
+      # Confluent's own KRaft documentation/tutorials, reused here purely
+      # for convenience (nothing about it is secret or environment-specific).
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
 volumes:
   rabbitmq-data:
   postgres-data:
+  kafka-data:

@@ -27,12 +27,12 @@ PIDS=()
 
 cleanup() {
     echo ""
-    echo "==> Stopping api + orchestrator..."
+    echo "==> Stopping api + orchestrator + stream-analytics..."
     for pid in "${PIDS[@]:-}"; do
         kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true
-    echo "==> Stopped. RabbitMQ/Postgres containers are still running -- 'docker compose down' to stop them too."
+    echo "==> Stopped. RabbitMQ/Postgres/Kafka containers are still running -- 'docker compose down' to stop them too."
 }
 trap cleanup EXIT INT TERM
 
@@ -50,6 +50,12 @@ until docker compose -f "$ROOT_DIR/docker-compose.yml" exec -T postgres pg_isrea
     sleep 1
 done
 echo "    Postgres is up."
+
+echo "==> Waiting for Kafka to be healthy..."
+until docker compose -f "$ROOT_DIR/docker-compose.yml" exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1; do
+    sleep 1
+done
+echo "    Kafka is up."
 
 setup_venv() {
     local service_dir="$1"
@@ -77,6 +83,9 @@ echo "==> Running Alembic migrations..."
 echo "==> Setting up orchestrator..."
 setup_venv "$ROOT_DIR/services/orchestrator"
 
+echo "==> Setting up stream-analytics..."
+setup_venv "$ROOT_DIR/services/stream-analytics"
+
 run_service() {
     local name="$1"
     local service_dir="$2"
@@ -94,14 +103,18 @@ run_service "api" "$ROOT_DIR/services/api" \
 run_service "orchestrator" "$ROOT_DIR/services/orchestrator" \
     .venv/bin/python3 -m app.worker
 
+run_service "stream-analytics" "$ROOT_DIR/services/stream-analytics" \
+    .venv/bin/python3 -m app.consumer
+
 echo ""
 echo "All services started:"
 echo "  API docs:      http://localhost:8000/docs"
 echo "  RabbitMQ UI:   http://localhost:15672 (guest/guest)"
 echo "  Postgres:      localhost:5432 (quantum/quantum, db=quantum_platform)"
+echo "  Kafka:         localhost:9092"
 echo "  Logs:          $LOG_DIR/"
 echo ""
-echo "Tailing logs (Ctrl+C stops api + orchestrator)..."
+echo "Tailing logs (Ctrl+C stops api + orchestrator + stream-analytics)..."
 echo ""
 
-tail -f "$LOG_DIR/api.log" "$LOG_DIR/orchestrator.log"
+tail -f "$LOG_DIR/api.log" "$LOG_DIR/orchestrator.log" "$LOG_DIR/stream-analytics.log"

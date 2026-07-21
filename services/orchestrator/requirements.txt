@@ -2,6 +2,7 @@
 -e ../quantum-core
 
 aio-pika>=9.4
+aiokafka>=0.11
 
 # Dev/test
 pytest>=8.0

@@ -4,13 +4,14 @@ executes them via app.tasks.run_experiment (which calls quantum_core.execution
 -- the same functions the API used to call directly before this queue
 existed), and publishes an ExperimentResultMessage back so the API can
 update its store. Also launches a periodic calibration cycle
-(app.tasks.calibration) as a background task alongside task processing.
+(app.tasks.calibration), which publishes to Kafka rather than RabbitMQ --
+see docs/architecture/kafka.md.
 
-This module itself is deliberately thin -- just RabbitMQ connection setup
-and the consume loop. Dispatch logic lives in app/tasks/run_experiment.py,
-retry/dead-letter policy lives in app/retry_policy.py, and calibration
-lives in app/tasks/calibration.py -- each independently testable without
-needing a real RabbitMQ connection.
+This module itself is deliberately thin -- just RabbitMQ/Kafka connection
+setup and the consume loop. Dispatch logic lives in
+app/tasks/run_experiment.py, retry/dead-letter policy lives in
+app/retry_policy.py, and calibration lives in app/tasks/calibration.py --
+each independently testable without needing a real broker connection.
 
 Three distinct failure modes, handled differently -- see retry_policy.py
 for the third:
@@ -53,6 +54,7 @@ import os
 
 import aio_pika
 from aio_pika.abc import AbstractIncomingMessage
+from aiokafka import AIOKafkaProducer
 
 from quantum_core.backends.aer_backend import AerBackend
 from quantum_core.backends.base import QuantumBackend
@@ -74,6 +76,7 @@ logger = logging.getLogger("orchestrator")
 logging.getLogger("qiskit").setLevel(logging.WARNING)
 
 RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost/")
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 CALIBRATION_INTERVAL_S = float(os.environ.get("CALIBRATION_INTERVAL_S", "300"))
 
 
@@ -117,6 +120,9 @@ async def handle_message(
 async def main() -> None:
     backend = AerBackend()
 
+    kafka_producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+    await kafka_producer.start()
+
     connection = await aio_pika.connect_robust(RABBITMQ_URL)
     async with connection:
         channel = await connection.channel()
@@ -137,7 +143,7 @@ async def main() -> None:
         await channel.declare_queue(RESULTS_QUEUE_NAME, durable=True)
 
         calibration_task = asyncio.create_task(
-            run_calibration_loop(backend, channel, interval_s=CALIBRATION_INTERVAL_S)
+            run_calibration_loop(backend, kafka_producer, interval_s=CALIBRATION_INTERVAL_S)
         )
 
         logger.info("orchestrator started, waiting for tasks on %r", TASK_QUEUE_NAME)
@@ -162,6 +168,7 @@ async def main() -> None:
                 await calibration_task
             except asyncio.CancelledError:
                 pass
+            await kafka_producer.stop()
 
 
 if __name__ == "__main__":

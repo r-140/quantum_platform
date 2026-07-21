@@ -6,7 +6,7 @@ single `error_rate` metric.
 This is the first piece of the "automation systems" / calibration idea
 sketched in the very first architecture discussion for this project (and
 the reason `mock_hw_backend.py` simulates a "calibration in progress"
-failure state) -- it existed only as an idea until now.
+failure state).
 
 The circuit: a Bell pair (H + CX on 2 qubits, same construction as
 demo_aer.py, already confirmed working end-to-end). An ideal Bell pair
@@ -20,16 +20,13 @@ far) is a *noiseless* simulator -- no noise model is configured, so
 This module is still worth having: it's a real, working health-check
 (confirms the backend is up, responsive, and produces circuits that behave
 as expected), and it's the natural place to plug in an Aer noise model (or
-eventually a real backend) to get meaningful drift signal later. Treat the
-current version as "verified plumbing, not yet a meaningful signal."
+eventually a real backend) to get meaningful drift signal later.
 
-Results are currently published to a RabbitMQ queue (`calibration-results`)
-as a stand-in for the Kafka telemetry stream discussed in this project's
-very first architecture conversation (RabbitMQ for task queues, Kafka for
-time-series telemetry -- see docs/architecture/orchestration.md's "Почему
-RabbitMQ, а не Kafka" section). Swapping the publish target from a
-RabbitMQ queue to a Kafka topic later shouldn't require touching
-`run_calibration()` itself, only `publish_calibration_result()`.
+Results are published to the Kafka topic `calibration-results`, consumed
+in real time by services/stream-analytics (rolling error-rate average,
+alerting). This used to publish to a RabbitMQ queue as a temporary
+stand-in -- see docs/architecture/kafka.md for the migration and why
+`run_calibration()` itself didn't need to change, only the publish step.
 """
 
 from __future__ import annotations
@@ -39,7 +36,7 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
-import aio_pika
+from aiokafka import AIOKafkaProducer
 from qiskit import QuantumCircuit
 
 from quantum_core.backends.base import Circuit, QuantumBackend
@@ -47,7 +44,7 @@ from quantum_core.sync.polling import PollingConfig, wait_for_result
 
 logger = logging.getLogger("orchestrator.calibration")
 
-CALIBRATION_QUEUE_NAME = "calibration-results"
+CALIBRATION_TOPIC = "calibration-results"
 DEFAULT_SHOTS = 1024
 
 
@@ -98,32 +95,27 @@ async def run_calibration(backend: QuantumBackend, *, shots: int = DEFAULT_SHOTS
     )
 
 
-async def publish_calibration_result(
-    channel: aio_pika.abc.AbstractChannel, result: CalibrationResult
-) -> None:
-    await channel.declare_queue(CALIBRATION_QUEUE_NAME, durable=True)
-    await channel.default_exchange.publish(
-        aio_pika.Message(body=result.to_json().encode()),
-        routing_key=CALIBRATION_QUEUE_NAME,
-    )
+async def publish_calibration_result(producer: AIOKafkaProducer, result: CalibrationResult) -> None:
+    await producer.send_and_wait(CALIBRATION_TOPIC, result.to_json().encode())
 
 
 async def run_calibration_loop(
     backend: QuantumBackend,
-    channel: aio_pika.abc.AbstractChannel,
+    producer: AIOKafkaProducer,
     *,
     interval_s: float = 300.0,
 ) -> None:
     """Runs `run_calibration` repeatedly forever, with `interval_s` between
     cycles (default 5 minutes). Meant to be launched as a background
     `asyncio.create_task` alongside the main task-consuming loop in
-    worker.py -- it shares the same backend instance and the same RabbitMQ
-    channel/connection, but runs independently of task processing.
+    worker.py -- it shares the same backend instance, but has its own
+    Kafka producer (started/stopped independently of the RabbitMQ
+    connection used for task processing).
     """
     while True:
         try:
             result = await run_calibration(backend)
-            await publish_calibration_result(channel, result)
+            await publish_calibration_result(producer, result)
             logger.info(
                 "calibration cycle: error_rate=%.4f shots=%d", result.error_rate, result.shots
             )
@@ -135,7 +127,7 @@ async def run_calibration_loop(
 
 if __name__ == "__main__":
     # Manual one-off run: python3 -m app.tasks.calibration
-    # Prints the result instead of publishing to RabbitMQ -- useful for
+    # Prints the result instead of publishing to Kafka -- useful for
     # checking the backend is healthy without needing a broker connection.
     from quantum_core.backends.aer_backend import AerBackend
 
