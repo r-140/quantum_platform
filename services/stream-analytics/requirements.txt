@@ -1,5 +1,6 @@
 aiokafka>=0.11
 asyncpg>=0.29
+faust-streaming>=0.10.21   # 0.10.21+ has official Python 3.12 support (PR #587)
 
 # Dev/test
 pytest>=8.0
