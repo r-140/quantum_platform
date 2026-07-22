@@ -57,6 +57,12 @@ until docker compose -f "$ROOT_DIR/docker-compose.yml" exec -T kafka kafka-broke
 done
 echo "    Kafka is up."
 
+echo "==> Waiting for TimescaleDB to be healthy..."
+until docker compose -f "$ROOT_DIR/docker-compose.yml" exec -T timescaledb pg_isready -U quantum >/dev/null 2>&1; do
+    sleep 1
+done
+echo "    TimescaleDB is up."
+
 setup_venv() {
     local service_dir="$1"
     (
@@ -112,6 +118,7 @@ echo "  API docs:      http://localhost:8000/docs"
 echo "  RabbitMQ UI:   http://localhost:15672 (guest/guest)"
 echo "  Postgres:      localhost:5432 (quantum/quantum, db=quantum_platform)"
 echo "  Kafka:         localhost:9092"
+echo "  TimescaleDB:   localhost:5433 (quantum/quantum, db=telemetry)"
 echo "  Logs:          $LOG_DIR/"
 echo ""
 echo "Tailing logs (Ctrl+C stops api + orchestrator + stream-analytics)..."

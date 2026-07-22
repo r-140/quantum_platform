@@ -140,6 +140,69 @@ naive/aware datetime.
 `docker-entrypoint-initdb.d`-инициализация, `asyncpg`-подключение к
 контейнеру. У меня нет ни `asyncpg`, ни Docker.
 
+## Faust: настоящий "Kafka Streams для Python"
+
+`stream-analytics/app/consumer.py` (hand-rolled `aiokafka`-consumer) и
+`stream-analytics/app/faust_app.py` (новый) решают **одну и ту же**
+задачу — rolling average `error_rate` по backend — двумя разными
+инструментами, специально для сравнения. "Kafka Streams" в строгом
+смысле — Java/Scala-библиотека; Python-эквивалент с похожей семантикой
+(tables, windowing, changelog-backed state) — `faust-streaming`, активно
+поддерживаемый форк оригинального `faust` (Robinhood, заброшен с 2020).
+
+Оба consumer'а могут работать **одновременно** против одного топика — у
+каждого своя consumer group (`stream-analytics` для hand-rolled,
+`stream-analytics-faust` для Faust), поэтому они не конкурируют за
+партиции.
+
+**Ключевое отличие от `RollingErrorRate`**: Faust'овская windowed
+`Table` — changelog-backed. Каждое обновление таблицы дополнительно
+пишется во внутренний Kafka-топик (changelog); при рестарте воркера Faust
+реплеит этот changelog и восстанавливает состояние. У `RollingErrorRate`
+(обычный `deque` в памяти) такого свойства нет — рестарт обнуляет его
+полностью. TimescaleDB (см. выше) закрывает тот же пробел другим
+способом — через внешнюю БД, а не встроенный механизм Kafka. Три разных
+ответа на "как не терять состояние при рестарте" в одном небольшом
+проекте — удобный повод сравнить их напрямую.
+
+Использована tumbling-window агрегация (60 секунд, не совпадает с
+интервалом calibration по умолчанию 300 секунд — специально, чтобы было
+что понаблюдать в разумные сроки демо, большинство окон будут пустыми,
+это ожидаемо) — две параллельные `Table` (сумма + счётчик) вместо одной
+составной, по образцу из официальной документации Faust.
+
+⚠️ **Версионный риск, проверенный заранее**: у `faust-streaming` были
+проблемы совместимости с новыми версиями Python в прошлом (не
+поддерживал 3.10 на момент issue #762 в 2022). Официальная поддержка
+Python 3.12 добавлена в PR #587 — зафиксировал минимальную версию
+(`faust-streaming>=0.10.21`) в `requirements.txt` явно, а не понадеялся,
+что "последняя версия" подойдёт.
+
+По умолчанию Faust хранит состояние таблиц в RocksDB (нативное C++
+расширение) — сознательно переключил на `store="memory://"`, чтобы не
+требовать сборки `rocksdb` для demo/learning-окружения. Это не меняет
+changelog-backed свойство (оно от Kafka, не от локального хранилища) —
+влияет только на то, где живут данные таблицы *между* обращениями внутри
+одного запущенного процесса.
+
+### Запуск
+
+```bash
+cd services/stream-analytics
+source .venv/bin/activate
+pip install -r requirements.txt
+
+python3 -m app.faust_app worker -l info
+# или, более идиоматично для Faust:
+faust -A app.faust_app worker -l info
+```
+
+Полезные встроенные команды Faust CLI (когда воркер не запущен):
+```bash
+faust -A app.faust_app tables    # список таблиц
+faust -A app.faust_app agents    # список агентов
+```
+
 ## Как запустить
 
 Уже встроено в `./dev.sh` — поднимает Kafka и TimescaleDB вместе с

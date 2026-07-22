@@ -1,7 +1,10 @@
 """
 Consumes the `calibration-results` Kafka topic (published by
-orchestrator/app/tasks/calibration.py) and computes a rolling average
-error_rate per backend, logging an alert if it exceeds a threshold.
+orchestrator/app/tasks/calibration.py), computes a rolling average
+error_rate per backend (logging an alert if it exceeds a threshold), and
+persists each raw event into TimescaleDB via app.sinks.timescale_sink --
+so calibration history survives a process restart, unlike the in-memory
+rolling window (see rolling.py's docstring).
 
 This is the "stream-analytics" piece sketched in the very first
 architecture discussion for this project -- the real-time-aggregation
@@ -25,12 +28,16 @@ import os
 from aiokafka import AIOKafkaConsumer
 
 from app.rolling import RollingErrorRate
+from app.sinks.timescale_sink import create_pool, insert_calibration_event
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("stream-analytics")
 
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 CALIBRATION_TOPIC = "calibration-results"
+TIMESCALE_DSN = os.environ.get(
+    "TIMESCALE_DSN", "postgresql://quantum:quantum@localhost:5433/telemetry"
+)
 
 # Rolling average above this triggers an ALERT log line. 5% is a somewhat
 # arbitrary placeholder -- there's no real drift signal to calibrate this
@@ -49,6 +56,7 @@ async def consume_calibration_results() -> None:
         auto_offset_reset="latest",
     )
     rolling = RollingErrorRate()
+    timescale_pool = await create_pool(TIMESCALE_DSN)
 
     await consumer.start()
     logger.info("stream-analytics started, consuming %r", CALIBRATION_TOPIC)
@@ -74,8 +82,14 @@ async def consume_calibration_results() -> None:
                     rolling_avg,
                     ALERT_THRESHOLD,
                 )
+
+            try:
+                await insert_calibration_event(timescale_pool, payload)
+            except Exception:  # noqa: BLE001 -- a failed write shouldn't stop consuming
+                logger.exception("failed to persist calibration event to TimescaleDB")
     finally:
         await consumer.stop()
+        await timescale_pool.close()
 
 
 if __name__ == "__main__":

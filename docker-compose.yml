@@ -76,7 +76,32 @@ services:
       timeout: 10s
       retries: 10
 
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: quantum-platform-timescaledb
+    ports:
+      - "5433:5432"    # 5433, not 5432 -- avoids colliding with the plain
+                        # `postgres` service above (experiment metadata,
+                        # unrelated database) on the same host.
+    environment:
+      POSTGRES_USER: quantum
+      POSTGRES_PASSWORD: quantum
+      POSTGRES_DB: telemetry
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+      # Anything in docker-entrypoint-initdb.d/ runs automatically on
+      # first container init (empty data dir only) -- this is what
+      # creates the calibration_events hypertable, no Alembic-style
+      # migration tool needed for a single append-only table.
+      - ./services/stream-analytics/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quantum"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
   rabbitmq-data:
   postgres-data:
   kafka-data:
+  timescaledb-data:
