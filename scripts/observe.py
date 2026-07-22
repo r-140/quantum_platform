@@ -45,6 +45,14 @@ from aiokafka import AIOKafkaConsumer
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger("observe")
 
+# httpx (and its underlying httpcore) log every single request/response at
+# INFO level by default -- with a poller hitting GET every second for
+# every tracked experiment, this drowns out the actually useful
+# [submit]/[status]/[kafka]/[postgres]/[timescale] lines. Silencing these
+# specifically (not the root logger) keeps our own INFO logging intact.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 POSTGRES_DSN = os.environ.get(
@@ -243,22 +251,50 @@ async def db_snapshot(state: SharedState, *, interval: float = 10.0) -> None:
             logger.error("[timescale] snapshot failed: %s", exc)
 
 
-async def wait_for_all_resolved(state: SharedState, *, submitters_done: asyncio.Event, timeout: float = 180.0) -> None:
+async def wait_for_all_resolved(
+    state: SharedState, *, submitters_done: asyncio.Event, timeout: float = 180.0
+) -> None:
     """Stops the whole script once the load generator has finished
     submitting AND every submitted experiment has reached a terminal
     status (or `timeout` seconds have passed, in case something is stuck
     -- e.g. the orchestrator isn't running).
+
+    Prints a heartbeat every 10s while waiting on a backlog -- without
+    this, a run with several VQE experiments queued behind a
+    single-worker orchestrator (prefetch_count=1, see
+    docs/architecture/orchestration.md) looks indistinguishable from a
+    genuinely stuck script: nothing else prints while the queue drains,
+    and a VQE run alone can take a dozen-plus seconds even with the
+    reduced `max_iterations=20` this script submits with.
     """
     await submitters_done.wait()
     deadline = time.monotonic() + timeout
+    last_heartbeat = time.monotonic()
+
     while time.monotonic() < deadline:
-        if all(t.status != "queued" for t in state.tracked.values()):
+        pending = [t for t in state.tracked.values() if t.status == "queued"]
+        if not pending:
             break
+
+        if time.monotonic() - last_heartbeat >= 10.0:
+            remaining = deadline - time.monotonic()
+            logger.info(
+                "[main] still waiting: %d experiment(s) queued (timeout in %.0fs) -- %s",
+                len(pending),
+                remaining,
+                ", ".join(f"{t.algorithm}" for t in pending[:5])
+                + ("..." if len(pending) > 5 else ""),
+            )
+            last_heartbeat = time.monotonic()
+
         await asyncio.sleep(1.0)
     else:
         logger.warning("[main] timed out waiting for all experiments to resolve")
 
-    logger.info("[main] all done, stopping background tasks (kafka tail / db snapshots keep running a bit longer)")
+    logger.info(
+        "[main] all done, stopping background tasks "
+        "(kafka tail / db snapshots keep running a few more seconds)"
+    )
     await asyncio.sleep(5.0)  # let the last db_snapshot/kafka message land before shutdown
     state.stop.set()
 
@@ -271,6 +307,12 @@ async def main() -> None:
     parser.add_argument("--sat-grover-weight", type=float, default=0.3)
     parser.add_argument("--qpe-weight", type=float, default=0.2)
     parser.add_argument("--vqe-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--max-wait",
+        type=float,
+        default=180.0,
+        help="max seconds to wait for all submitted experiments to resolve before giving up",
+    )
     args = parser.parse_args()
 
     weights = {
@@ -293,7 +335,7 @@ async def main() -> None:
             status_poller(client, state),
             kafka_tailer(state),
             db_snapshot(state),
-            wait_for_all_resolved(state, submitters_done=submitters_done),
+            wait_for_all_resolved(state, submitters_done=submitters_done, timeout=args.max_wait),
         )
 
     logger.info("[main] finished. Tracked %d experiments.", len(state.tracked))
