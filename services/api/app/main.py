@@ -6,7 +6,8 @@ root docker-compose.yml, and docs/architecture/postgres.md for running
 Alembic migrations first):
     uvicorn app.main:app --reload --port 8000
 
-Then either use the interactive docs at http://localhost:8000/docs, or:
+Then either use the interactive docs at http://localhost:8000/docs,
+the experiments dashboard at http://localhost:8000/dashboard/, or:
     curl -X POST http://localhost:8000/experiments \\
         -H "Content-Type: application/json" \\
         -d '{"algorithm": "grover", "marked_states": ["101"]}'
@@ -19,8 +20,10 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.db import close_db, init_db
 from app.deps import close_rabbitmq, get_rabbitmq_channel, get_store, init_rabbitmq, utcnow
@@ -33,6 +36,16 @@ logger = logging.getLogger("api")
 
 RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost/")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
+# Absolute path derived from this file's location, not a path relative to
+# the process's current working directory -- this project has twice
+# already hit bugs from assuming a particular CWD (editable installs
+# resolving `-e ../quantum-core` relative to the pip invocation's CWD, and
+# `alembic`/`python module.py` needing `-m` to get the right CWD on
+# sys.path). `uvicorn app.main:app` is always launched from services/api/
+# by convention here, but there's no reason to depend on that for
+# something this cheap to make robust instead.
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 async def apply_result_message(result_msg: ExperimentResultMessage, store: ExperimentStore) -> None:
@@ -125,6 +138,16 @@ app = FastAPI(
 
 app.include_router(experiments.router)
 app.include_router(backends.router)
+
+# Mounted at /dashboard, not "/" -- StaticFiles(html=True) at the root
+# would shadow every other route in this app (/experiments, /health,
+# /docs). Serves static/dashboard/index.html for GET /dashboard/ (and any
+# path under it) automatically.
+app.mount(
+    "/dashboard",
+    StaticFiles(directory=STATIC_DIR / "dashboard", html=True),
+    name="dashboard",
+)
 
 
 @app.get("/health")

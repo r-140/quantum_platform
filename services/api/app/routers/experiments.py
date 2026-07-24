@@ -84,6 +84,18 @@ async def submit_experiment(
     return response
 
 
+@router.get("/stats")
+async def get_experiment_stats(store: ExperimentStore = Depends(get_store)) -> list[dict]:
+    """Per (algorithm, status) counts -- powers the dashboard's summary
+    header. Registered *before* GET /{experiment_id} below: FastAPI/
+    Starlette match routes in registration order, and a path parameter
+    route matches any string -- if this came after {experiment_id}, a
+    request to /experiments/stats would be captured as
+    experiment_id="stats" and never reach this handler.
+    """
+    return await store.stats()
+
+
 @router.get("/{experiment_id}", response_model=ExperimentResponse)
 async def get_experiment(
     experiment_id: str, store: ExperimentStore = Depends(get_store)
@@ -95,5 +107,12 @@ async def get_experiment(
 
 
 @router.get("", response_model=list[ExperimentResponse])
-async def list_experiments(store: ExperimentStore = Depends(get_store)) -> list[ExperimentResponse]:
-    return await store.list_all()
+async def list_experiments(
+    algorithm: str | None = None,
+    status: str | None = None,
+    sort: str = "desc",
+    store: ExperimentStore = Depends(get_store),
+) -> list[ExperimentResponse]:
+    if sort not in ("asc", "desc"):
+        raise HTTPException(status_code=422, detail="sort must be 'asc' or 'desc'")
+    return await store.list_all(algorithm=algorithm, status=status, sort_desc=(sort == "desc"))

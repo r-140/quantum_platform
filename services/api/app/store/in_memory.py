@@ -30,6 +30,33 @@ class InMemoryExperimentStore(ExperimentStore):
         async with self._lock:
             return self._data.get(experiment_id)
 
-    async def list_all(self) -> list[ExperimentResponse]:
+    async def list_all(
+        self,
+        *,
+        algorithm: str | None = None,
+        status: str | None = None,
+        sort_desc: bool = True,
+    ) -> list[ExperimentResponse]:
         async with self._lock:
-            return sorted(self._data.values(), key=lambda e: e.submitted_at)
+            experiments = list(self._data.values())
+
+        if algorithm is not None:
+            experiments = [e for e in experiments if e.algorithm == algorithm]
+        if status is not None:
+            experiments = [e for e in experiments if e.status == status]
+
+        return sorted(experiments, key=lambda e: e.submitted_at, reverse=sort_desc)
+
+    async def stats(self) -> list[dict[str, str | int]]:
+        async with self._lock:
+            experiments = list(self._data.values())
+
+        counts: dict[tuple[str, str], int] = {}
+        for e in experiments:
+            key = (e.algorithm, e.status)
+            counts[key] = counts.get(key, 0) + 1
+
+        return [
+            {"algorithm": algorithm, "status": status, "count": count}
+            for (algorithm, status), count in sorted(counts.items())
+        ]

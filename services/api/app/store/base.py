@@ -36,5 +36,26 @@ class ExperimentStore(ABC):
         """
 
     @abstractmethod
-    async def list_all(self) -> list[ExperimentResponse]:
-        """Returns all known experiments, ordered by submission time."""
+    async def list_all(
+        self,
+        *,
+        algorithm: str | None = None,
+        status: str | None = None,
+        sort_desc: bool = True,
+    ) -> list[ExperimentResponse]:
+        """Returns known experiments, optionally filtered by exact
+        `algorithm`/`status` match, sorted by `submitted_at` (newest first
+        by default -- `sort_desc=False` for oldest first). Filtering is
+        pushed down to the storage layer (SQL WHERE for Postgres, a plain
+        loop for in-memory) rather than left to callers to filter a full
+        list themselves -- the dashboard frontend relies on this to avoid
+        pulling every experiment over the wire just to show one algorithm.
+        """
+
+    @abstractmethod
+    async def stats(self) -> list[dict[str, str | int]]:
+        """Returns per (algorithm, status) counts, e.g.
+        `[{"algorithm": "grover", "status": "completed", "count": 12}, ...]`
+        -- powers the dashboard's summary header without requiring the
+        frontend to fetch and locally tally the full experiment list.
+        """

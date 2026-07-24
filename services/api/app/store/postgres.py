@@ -15,7 +15,7 @@ Postgres-specific behavior -- see docs/architecture/postgres.md).
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -70,9 +70,35 @@ class PostgresExperimentStore(ExperimentStore):
             row = await session.get(ExperimentRow, experiment_id)
             return _row_to_response(row) if row is not None else None
 
-    async def list_all(self) -> list[ExperimentResponse]:
+    async def list_all(
+        self,
+        *,
+        algorithm: str | None = None,
+        status: str | None = None,
+        sort_desc: bool = True,
+    ) -> list[ExperimentResponse]:
+        stmt = select(ExperimentRow)
+        if algorithm is not None:
+            stmt = stmt.where(ExperimentRow.algorithm == algorithm)
+        if status is not None:
+            stmt = stmt.where(ExperimentRow.status == status)
+
+        order_column = ExperimentRow.submitted_at.desc() if sort_desc else ExperimentRow.submitted_at.asc()
+        stmt = stmt.order_by(order_column)
+
         async with self._sessionmaker() as session:
-            result = await session.execute(
-                select(ExperimentRow).order_by(ExperimentRow.submitted_at)
-            )
+            result = await session.execute(stmt)
             return [_row_to_response(row) for row in result.scalars().all()]
+
+    async def stats(self) -> list[dict[str, str | int]]:
+        stmt = (
+            select(ExperimentRow.algorithm, ExperimentRow.status, func.count().label("count"))
+            .group_by(ExperimentRow.algorithm, ExperimentRow.status)
+            .order_by(ExperimentRow.algorithm, ExperimentRow.status)
+        )
+        async with self._sessionmaker() as session:
+            result = await session.execute(stmt)
+            return [
+                {"algorithm": row.algorithm, "status": row.status, "count": row.count}
+                for row in result.all()
+            ]
