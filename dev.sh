@@ -1,14 +1,29 @@
 #!/usr/bin/env bash
-# Starts the whole local stack from the repo root: RabbitMQ + Postgres
-# (docker compose), Alembic migrations, then api + orchestrator, each in
-# its own venv. Ctrl+C stops api/orchestrator; containers are left running
-# (fast restart next time) -- `docker compose down` separately to stop them.
+# Starts the whole local stack from the repo root: RabbitMQ + Postgres +
+# Kafka + TimescaleDB (docker compose), Alembic migrations, then
+# api + orchestrator + stream-analytics, each in its own venv.
+#
+# Profiles (Maven-style -P, spelled --profile=<name> since this is bash):
+#   --profile=quick   (default) -- setup + start, no test runs. Fast inner
+#                      loop for "I just want the stack up."
+#   --profile=verify  -- runs each service's pytest suite (if it has one)
+#                      right after that service's venv is set up, BEFORE
+#                      any service is started. Aborts immediately (nothing
+#                      gets started) if any suite fails -- mirrors `mvn
+#                      verify` failing the build before `install`/deploy,
+#                      rather than silently starting a stack you can't
+#                      trust. quantum-core's own test suite is included
+#                      too, run via api's venv since quantum-core is only
+#                      ever installed as an editable dependency of the
+#                      other services here, not given its own venv setup
+#                      step (see run_tests_if_present below).
 #
 # Run from the repo root:
 #   ./dev.sh
+#   ./dev.sh --profile=verify
 #
-# Logs for api/orchestrator are written to .dev-logs/ (gitignored) and
-# tailed live in this terminal.
+# Logs for api/orchestrator/stream-analytics are written to .dev-logs/
+# (gitignored) and tailed live in this terminal.
 #
 # First run creates each service's .venv automatically if missing, and
 # always runs `pip install -r requirements.txt` (cheap/no-op once
@@ -23,6 +38,29 @@ mkdir -p "$LOG_DIR"
 
 export DATABASE_URL="postgresql+asyncpg://quantum:quantum@localhost:5432/quantum_platform"
 
+PROFILE="quick"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --profile=*) PROFILE="${1#*=}"; shift ;;
+        --profile) PROFILE="${2:-}"; shift 2 ;;
+        -h|--help)
+            grep '^#' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1 (see --help)" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ "$PROFILE" != "quick" && "$PROFILE" != "verify" ]]; then
+    echo "Unknown profile '$PROFILE' -- expected 'quick' or 'verify'" >&2
+    exit 1
+fi
+
+echo "==> Profile: $PROFILE"
+
 PIDS=()
 
 cleanup() {
@@ -32,11 +70,11 @@ cleanup() {
         kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true
-    echo "==> Stopped. RabbitMQ/Postgres/Kafka containers are still running -- 'docker compose down' to stop them too."
+    echo "==> Stopped. RabbitMQ/Postgres/Kafka/TimescaleDB containers are still running -- 'docker compose down' to stop them too."
 }
 trap cleanup EXIT INT TERM
 
-echo "==> Starting RabbitMQ + Postgres (docker compose)..."
+echo "==> Starting RabbitMQ + Postgres + Kafka + TimescaleDB (docker compose)..."
 docker compose -f "$ROOT_DIR/docker-compose.yml" up -d
 
 echo "==> Waiting for RabbitMQ to be healthy..."
@@ -80,17 +118,59 @@ setup_venv() {
     )
 }
 
+# Runs `pytest tests/ -v` for a service using ITS OWN venv, but only if
+# that service actually has a tests/ directory containing at least one
+# `test_*.py` file -- not every service has a test suite yet (e.g.
+# orchestrator doesn't, at time of writing), and this should be a silent
+# no-op for those rather than an error. Aborts the *entire* script (before
+# any service is started) if a suite that DOES exist fails -- see the
+# --profile=verify description at the top of this file for why that's the
+# desired behavior, not just "log a warning and carry on."
+#
+# Third argument overrides which venv to run pytest from -- used for
+# quantum-core, which has no venv-setup step of its own in this script (see
+# call site below).
+run_tests_if_present() {
+    local name="$1"
+    local service_dir="$2"
+    local venv_owner_dir="${3:-$service_dir}"
+
+    if [ ! -d "$service_dir/tests" ] || [ -z "$(find "$service_dir/tests" -name 'test_*.py' 2>/dev/null | head -1)" ]; then
+        return 0
+    fi
+
+    echo "==> [verify] running tests for $name..."
+    if ! (cd "$service_dir" && "$venv_owner_dir/.venv/bin/pytest" tests/ -v); then
+        echo "==> [verify] $name tests FAILED -- aborting before starting any service" >&2
+        exit 1
+    fi
+}
+
 echo "==> Setting up api..."
 setup_venv "$ROOT_DIR/services/api"
+
+if [ "$PROFILE" = "verify" ]; then
+    # quantum-core is only ever installed as an editable dependency of the
+    # services below (`-e ../quantum-core` in their requirements.txt) --
+    # it has no venv-setup step of its own here. Its own test suite
+    # (polling.py's CircuitBreaker/wait_for_result tests) is still worth
+    # running in verify mode, so it borrows api's already-set-up venv
+    # (pytest is run *from* quantum-core's own directory, so its
+    # pyproject.toml's asyncio_mode=auto setting still applies).
+    run_tests_if_present "quantum-core" "$ROOT_DIR/services/quantum-core" "$ROOT_DIR/services/api"
+    run_tests_if_present "api" "$ROOT_DIR/services/api"
+fi
 
 echo "==> Running Alembic migrations..."
 (cd "$ROOT_DIR/services/api" && ./.venv/bin/python3 -m alembic upgrade head)
 
 echo "==> Setting up orchestrator..."
 setup_venv "$ROOT_DIR/services/orchestrator"
+[ "$PROFILE" = "verify" ] && run_tests_if_present "orchestrator" "$ROOT_DIR/services/orchestrator"
 
 echo "==> Setting up stream-analytics..."
 setup_venv "$ROOT_DIR/services/stream-analytics"
+[ "$PROFILE" = "verify" ] && run_tests_if_present "stream-analytics" "$ROOT_DIR/services/stream-analytics"
 
 run_service() {
     local name="$1"
@@ -114,12 +194,13 @@ run_service "stream-analytics" "$ROOT_DIR/services/stream-analytics" \
 
 echo ""
 echo "All services started:"
-echo "  API docs:      http://localhost:8000/docs"
-echo "  RabbitMQ UI:   http://localhost:15672 (guest/guest)"
-echo "  Postgres:      localhost:5432 (quantum/quantum, db=quantum_platform)"
-echo "  Kafka:         localhost:9092"
-echo "  TimescaleDB:   localhost:5433 (quantum/quantum, db=telemetry)"
-echo "  Logs:          $LOG_DIR/"
+echo "  API docs:          http://localhost:8000/docs"
+echo "  Experiments board: http://localhost:8000/dashboard/"
+echo "  RabbitMQ UI:       http://localhost:15672 (guest/guest)"
+echo "  Postgres:          localhost:5432 (quantum/quantum, db=quantum_platform)"
+echo "  Kafka:             localhost:9092"
+echo "  TimescaleDB:       localhost:5433 (quantum/quantum, db=telemetry)"
+echo "  Logs:              $LOG_DIR/"
 echo ""
 echo "Tailing logs (Ctrl+C stops api + orchestrator + stream-analytics)..."
 echo ""
