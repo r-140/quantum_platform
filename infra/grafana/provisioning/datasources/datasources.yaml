@@ -1,0 +1,48 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  # Experiment metadata (queued/completed/failed counts, durations) --
+  # separate datasource from TimescaleDB below even though both are
+  # Postgres-family: different container, different database, different
+  # purpose (business data vs. telemetry). Grafana's own SQL editor can
+  # query this directly for ad-hoc panels even without the dashboard-app's
+  # own UI at /dashboard/ -- useful for anything the custom dashboard
+  # doesn't cover (e.g. "experiments per hour" trend charts, which ARE
+  # genuinely time-series and arguably belong here rather than in the
+  # data-browsing frontend -- see docs/architecture/dashboard.md).
+  - name: Postgres (experiments)
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    database: quantum_platform
+    user: quantum
+    secureJsonData:
+      password: quantum
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    editable: false
+
+  # calibration_events hypertable -- the actual SRE/telemetry use case
+  # this whole debug/ops stack was built for (see docs/architecture/kafka.md).
+  - name: TimescaleDB (telemetry)
+    type: postgres
+    access: proxy
+    url: timescaledb:5432
+    database: telemetry
+    user: quantum
+    secureJsonData:
+      password: quantum
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: true
+    editable: false

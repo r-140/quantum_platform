@@ -1,6 +1,8 @@
-# Local infrastructure for the quantum platform: RabbitMQ (task queue) and
-# Postgres (experiment metadata). Kafka/TimescaleDB/MinIO will be added
-# here as the project grows into them -- see docs/architecture/deferred-work.md.
+# Local infrastructure for the quantum platform:
+#   - RabbitMQ (task queue), Postgres (experiment metadata), Kafka
+#     (telemetry stream), TimescaleDB (calibration history)
+#   - Debug/ops stack: Prometheus + exporters, Grafana, Kafbat UI (Kafka
+#     browsing), Adminer (SQL browsing) -- see docs/architecture/observability.md
 #
 # Run with: docker compose up -d
 # RabbitMQ management UI: http://localhost:15672 (guest/guest)
@@ -12,11 +14,19 @@ services:
     ports:
       - "5672:5672"    # AMQP
       - "15672:15672"  # management UI
+      - "15692:15692"  # Prometheus metrics (rabbitmq_prometheus plugin)
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
+      # Enables the prometheus plugin alongside management. NOT using the
+      # RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbitmq_prometheus env var
+      # some blog posts suggest -- that only passes an Erlang VM argument,
+      # it does not actually enable a plugin (verified against RabbitMQ's
+      # own docs before choosing this approach instead). Mounting a custom
+      # enabled_plugins file is the officially documented mechanism.
+      - ./infra/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -100,8 +110,96 @@ services:
       timeout: 5s
       retries: 5
 
+  # --- Debug/ops stack -----------------------------------------------
+  # Separate from the experiments dashboard (that's a bespoke frontend for
+  # browsing business/research data, served by `api` -- see
+  # docs/architecture/dashboard.md). This half is genuinely SRE-style
+  # operational visibility: queue depth, consumer lag, error rates over
+  # time, raw Kafka message browsing, ad-hoc SQL. See
+  # docs/architecture/observability.md for the full reasoning.
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: quantum-platform-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: quantum-platform-postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://quantum:quantum@postgres:5432/quantum_platform?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  timescaledb-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: quantum-platform-timescaledb-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://quantum:quantum@timescaledb:5432/telemetry?sslmode=disable"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: quantum-platform-kafka-exporter
+    command: ["--kafka.server=kafka:9092"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: quantum-platform-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+
+  # Kafka UI, browsing topics/messages/consumer groups directly -- NOT the
+  # original `provectuslabs/kafka-ui` image: Provectus paused development
+  # in September 2023 and left an RCE vulnerability unpatched for ~6
+  # months before the community forked it. `kafbat/kafka-ui` is the
+  # actively maintained continuation (verified before picking this image,
+  # not assumed) -- see docs/architecture/observability.md.
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    container_name: quantum-platform-kafka-ui
+    ports:
+      - "8090:8080"    # 8090, not 8080 -- avoids colliding with anything
+                        # else a developer might have on 8080 locally.
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  adminer:
+    image: adminer:latest
+    container_name: quantum-platform-adminer
+    ports:
+      - "8091:8080"
+
 volumes:
   rabbitmq-data:
   postgres-data:
   kafka-data:
   timescaledb-data:
+  prometheus-data:
+  grafana-data:

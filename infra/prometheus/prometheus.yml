@@ -1,0 +1,32 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # RabbitMQ exposes Prometheus metrics natively on 15692 once the
+  # rabbitmq_prometheus plugin is enabled (see infra/rabbitmq/enabled_plugins
+  # -- NOT the RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS env var trick some blog
+  # posts suggest, which doesn't actually enable a plugin; verified against
+  # RabbitMQ's own docs before using this approach).
+  - job_name: rabbitmq
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+
+  # kafka_exporter talks to Kafka over the regular broker protocol (no
+  # Zookeeper dependency), so it works against our KRaft-mode single
+  # broker exactly the same way it would against any Kafka cluster.
+  - job_name: kafka
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: timescaledb
+    static_configs:
+      - targets: ["timescaledb-exporter:9187"]
