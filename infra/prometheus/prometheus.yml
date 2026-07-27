@@ -12,7 +12,16 @@ scrape_configs:
   # -- NOT the RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS env var trick some blog
   # posts suggest, which doesn't actually enable a plugin; verified against
   # RabbitMQ's own docs before using this approach).
+  #
+  # metrics_path is /metrics/per-object, not the default /metrics -- the
+  # default only exposes cluster-wide AGGREGATED metrics (total messages
+  # across all queues combined), with no way to see any single queue's
+  # depth. Per-object metrics require both this path AND
+  # infra/rabbitmq/rabbitmq.conf's `prometheus.return_per_object_metrics
+  # = true` -- verified via RabbitMQ's own prometheus plugin README before
+  # relying on this, not assumed.
   - job_name: rabbitmq
+    metrics_path: /metrics/per-object
     static_configs:
       - targets: ["rabbitmq:15692"]
 

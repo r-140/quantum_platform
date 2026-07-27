@@ -1,0 +1,58 @@
+{
+  "title": "Kafka (quantum-platform)",
+  "uid": "quantum-kafka",
+  "tags": ["quantum-platform", "kafka"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Exporter up",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        { "expr": "up{job=\"kafka\"}", "legendFormat": "kafka_exporter" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Partitions per topic",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 9, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        { "expr": "kafka_topic_partitions", "legendFormat": "{{topic}}", "instant": true, "format": "table" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Consumer group lag",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 9, "x": 15, "y": 0 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        {
+          "expr": "kafka_consumergroup_lag",
+          "legendFormat": "{{consumergroup}} / {{topic}} / p{{partition}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Topic partition current offset (messages produced over time)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        {
+          "expr": "kafka_topic_partition_current_offset",
+          "legendFormat": "{{topic}} / p{{partition}}"
+        }
+      ]
+    }
+  ]
+}

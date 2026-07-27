@@ -27,6 +27,7 @@ services:
       # own docs before choosing this approach instead). Mounting a custom
       # enabled_plugins file is the officially documented mechanism.
       - ./infra/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./infra/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -62,12 +63,25 @@ services:
       # Kafka 3.x+/Confluent Platform 7.5+).
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      # Two data-plane listeners, not one -- this project's own Python
+      # services (api/orchestrator/stream-analytics/scripts/observe.py)
+      # all run as host processes (never dockerized), so they need
+      # `localhost:9092` to work. But container-to-container clients
+      # (kafka-exporter, kafka-ui below) are NOT on `localhost` from their
+      # own point of view -- if advertised as `localhost:9092`, Kafka's
+      # protocol tells them "for real requests, reconnect to
+      # localhost:9092", which inside their own container means
+      # themselves, and the connection fails right after the initial
+      # handshake. Discovered this the hard way (matches the exact risk
+      # flagged in docs/architecture/observability.md before this was
+      # tested against real Docker) -- fixed with a second, internal-only
+      # listener advertised by Docker Compose service name instead.
+      KAFKA_LISTENERS: PLAINTEXT_INTERNAL://0.0.0.0:29092,PLAINTEXT_EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_INTERNAL://kafka:29092,PLAINTEXT_EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT,PLAINTEXT_EXTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
       # Replication factor 1 everywhere -- single-broker dev setup, not
       # meant to survive broker loss. Production would use >=3.
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
@@ -151,7 +165,10 @@ services:
   kafka-exporter:
     image: danielqsj/kafka-exporter:latest
     container_name: quantum-platform-kafka-exporter
-    command: ["--kafka.server=kafka:9092"]
+    # kafka:29092, not kafka:9092 -- this is a container-to-container
+    # client, needs the internal listener (see kafka service's own
+    # comments above for why the external one breaks container clients).
+    command: ["--kafka.server=kafka:29092"]
     depends_on:
       kafka:
         condition: service_healthy
@@ -185,7 +202,9 @@ services:
                         # else a developer might have on 8080 locally.
     environment:
       KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      # kafka:29092, not kafka:9092 -- same reasoning as kafka-exporter
+      # above: a container-to-container client needs the internal listener.
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
     depends_on:
       kafka:
         condition: service_healthy

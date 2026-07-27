@@ -1,0 +1,69 @@
+{
+  "title": "RabbitMQ (quantum-platform)",
+  "uid": "quantum-rabbitmq",
+  "tags": ["quantum-platform", "rabbitmq"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Broker up",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        { "expr": "up{job=\"rabbitmq\"}", "legendFormat": "rabbitmq" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Queue depth (ready + unacked), per queue",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        {
+          "expr": "rabbitmq_queue_messages_ready + rabbitmq_queue_messages_unacked",
+          "legendFormat": "{{queue}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Publish rate (msg/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(rabbitmq_channel_messages_published_total[1m])",
+          "legendFormat": "published"
+        },
+        {
+          "expr": "rate(rabbitmq_channel_messages_delivered_total[1m])",
+          "legendFormat": "delivered"
+        },
+        {
+          "expr": "rate(rabbitmq_channel_messages_acknowledged_total[1m])",
+          "legendFormat": "acknowledged"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Broker memory usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        {
+          "expr": "rabbitmq_process_resident_memory_bytes",
+          "legendFormat": "resident memory"
+        }
+      ]
+    }
+  ]
+}

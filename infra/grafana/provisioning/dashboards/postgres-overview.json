@@ -1,0 +1,79 @@
+{
+  "title": "Postgres & TimescaleDB (quantum-platform)",
+  "uid": "quantum-postgres",
+  "tags": ["quantum-platform", "postgres", "timescaledb"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Postgres (experiments) up",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        { "expr": "up{job=\"postgres\"}", "legendFormat": "postgres" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "TimescaleDB (telemetry) up",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        { "expr": "up{job=\"timescaledb\"}", "legendFormat": "timescaledb" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Active connections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        {
+          "expr": "pg_stat_database_numbackends{datname=\"quantum_platform\"}",
+          "legendFormat": "quantum_platform"
+        },
+        {
+          "expr": "pg_stat_database_numbackends{datname=\"telemetry\"}",
+          "legendFormat": "telemetry"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Committed transactions/s",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(pg_stat_database_xact_commit{datname=\"quantum_platform\"}[1m])",
+          "legendFormat": "quantum_platform"
+        },
+        {
+          "expr": "rate(pg_stat_database_xact_commit{datname=\"telemetry\"}[1m])",
+          "legendFormat": "telemetry"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "calibration_events: raw error_rate over time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
+      "datasource": { "type": "postgres", "uid": "timescaledb-telemetry" },
+      "targets": [
+        {
+          "rawSql": "SELECT time, error_rate, backend_name FROM calibration_events ORDER BY time",
+          "format": "time_series"
+        }
+      ]
+    }
+  ]
+}
