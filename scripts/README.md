@@ -20,14 +20,25 @@ Grover/SAT-Grover/QPE резолвятся быстро (<1с), VQE занима
 Требуется полностью работающий стек (`./dev.sh` из корня репозитория).
 
 ```bash
-cd scripts
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+./scripts/run_observe.sh                                    # дефолты: 1 эксп/сек, 20 секунд
+./scripts/run_observe.sh --rate 2.0 --duration 30            # интенсивнее и дольше
+./scripts/run_observe.sh --vqe-weight 0.5 --grover-weight 0.5 --sat-grover-weight 0 --qpe-weight 0  # почти только VQE — увидеть очередь наглядно
+```
 
-python3 observe.py                                    # дефолты: 1 эксп/сек, 20 секунд
-python3 observe.py --rate 2.0 --duration 30            # интенсивнее и дольше
-python3 observe.py --vqe-weight 0.5 --grover-weight 0.5 --sat-grover-weight 0 --qpe-weight 0  # почти только VQE — увидеть очередь наглядно
+`run_observe.sh` сам создаёт `.venv` и ставит зависимости при первом
+запуске (и просто перепроверяет их — быстро — при последующих), так что
+не нужно вручную повторять
+`python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
+каждый раз. Тот же паттерн, что уже использует `dev.sh` для остальных
+сервисов — прямой вызов бинарников из `.venv/bin/`, без `source activate`.
+
+Если предпочитаешь ручной запуск (например, из уже активированного
+venv) — `observe.py` по-прежнему можно вызвать напрямую как раньше:
+```bash
+cd scripts
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python3 observe.py --rate 2.0
 ```
 
 Флаги: `--rate` (эксп/сек), `--duration` (сколько секунд отправлять),
@@ -36,8 +47,8 @@ python3 observe.py --vqe-weight 0.5 --grover-weight 0.5 --sat-grover-weight 0 --
 в 1 — это просто веса для `random.choices`).
 
 Скрипт сам завершится, когда все отправленные эксперименты дойдут до
-терминального статуса (или через 180 секунд таймаута, если что-то зависло
-— например, `orchestrator` не запущен).
+терминального статуса (или через `--max-wait` секунд, по умолчанию 180,
+если что-то зависло — например, `orchestrator` не запущен).
 
 ### Что выводится
 
@@ -49,16 +60,13 @@ python3 observe.py --vqe-weight 0.5 --grover-weight 0.5 --sat-grover-weight 0 --
 
 ### ⚠️ Степень проверки
 
-Как и весь остальной проект — синтаксис/логика написаны по документации
-(`httpx`, `asyncpg`, `aiokafka`), но **не прогонялись против реального
-стека** — у меня нет ни одной из этих библиотек, ни Docker, ни сети для
-полноценной проверки. Отдельно стоит отметить: изначально использовал
-`consumer.getone()` в связке с `asyncio.wait_for()` для тайм-аута — нашёл
-открытый баг (`aio-libs/aiokafka#712`) именно про эту комбинацию (репорт
-про зависание), и заменил на `consumer.getmany(timeout_ms=...)`, где
-таймаут — часть самого API, без обёртки `wait_for`.
+`observe.py` уже подтверждён рабочим на реальном стеке (см. историю —
+полный прогон, 20 экспериментов, все дошли до `completed`, включая
+видимый бэклог из VQE в очереди). По пути нашёл и обошёл открытый баг
+`aiokafka` (`consumer.getone()` + `asyncio.wait_for()` = зависание,
+`aio-libs/aiokafka#712`) — заменил на `consumer.getmany(timeout_ms=...)`.
 
-Прогони и пришли результат — особенно интересно посмотреть на
-`--vqe-weight`-heavy прогон, чтобы увидеть, как долгий VQE в очереди
-блокирует остальные задачи (`prefetch_count=1`, один воркер `orchestrator`
-— см. `docs/architecture/orchestration.md`).
+`run_observe.sh` — новый, синтаксис проверен (`bash -n`), сам факт
+создания venv/установки зависимостей не прогонялся против реальной сети
+в моей среде, но логика идентична уже проверенному и подтверждённому
+паттерну `setup_venv()` из `dev.sh`.
