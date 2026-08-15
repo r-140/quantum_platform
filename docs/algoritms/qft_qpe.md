@@ -1,131 +1,137 @@
 # QFT / Quantum Phase Estimation (QPE)
 
-## Задача
+## The problem
 
-Дан унитарный оператор U и одно из его собственных состояний |ψ⟩, такое
-что U|ψ⟩ = e^(2πiφ)|ψ⟩. QPE оценивает φ с точностью до t бит, используя t
-дополнительных ("counting") кубитов.
+Given a unitary operator U and one of its eigenstates |ψ⟩, such that
+U|ψ⟩ = e^(2πiφ)|ψ⟩. QPE estimates φ to t bits of precision, using t
+extra ("counting") qubits.
 
-Зачем это нужно на практике: φ напрямую кодирует собственное значение U.
-Если взять U = e^(-iHt) для гамильтониана молекулы H (после дискретизации
-времени через Trotterization), QPE превращает задачу "найти энергию
-основного состояния" в задачу "найти фазу". Это точный, но дорогой по
-числу кубитов и глубине схемы метод — в диапазоне возможностей
-сегодняшнего NISQ-железа для реальных молекул обычно недостижим, отсюда и
-интерес к VQE как более "дешёвой" альтернативе (следующий шаг проекта).
-Сама Hamiltonian simulation (перевод H₂ в U = e^(-iHt)) в этот модуль пока
-не входит — это отдельная содержательная задача, которую добавим при
-переходе к VQE-сравнению.
+Why this matters in practice: φ directly encodes an eigenvalue of U. If
+you take U = e^(-iHt) for a molecule's Hamiltonian H (after
+time-discretization via Trotterization), QPE turns "find the ground-
+state energy" into "find the phase." This is an exact but expensive
+method in terms of qubit count and circuit depth — usually out of reach
+for real molecules on today's NISQ hardware, which is why VQE is
+interesting as a "cheaper" alternative (the project's next step).
+Hamiltonian simulation itself (turning H₂ into U = e^(-iHt)) isn't part
+of this module yet — that's a separate substantial piece of work, to be
+added when moving to the VQE comparison.
 
-## Как работает
+## How it works
 
-1. t кубитов в состоянии |0...0⟩ (counting register) + регистр с |ψ⟩.
-2. `H` на все counting-кубиты → равная суперпозиция.
-3. Для каждого counting-кубита j применяем controlled-U^(2^j), управляемый
-   этим кубитом, на регистр |ψ⟩. Поскольку |ψ⟩ — собственное состояние,
-   это не меняет |ψ⟩, а "впрыскивает" фазу e^(2πiφ·2^j) в амплитуду ветки
-   суперпозиции, где кубит j равен 1 (снова phase kickback, тот же
-   механизм, что и в SAT-оракуле Grover).
-4. После всех j состояние counting-регистра — это ровно QFT от числа
-   k = φ·2ᵗ (если φ·2ᵗ — целое, что бывает не всегда).
-5. Применяем **обратный QFT** — это "расшифровывает" k обратно в
-   вычислительный базис. Измерение даёт k с высокой вероятностью (100%,
-   если φ точно представимо в t битах; иначе — пик около ближайшего k).
+1. t qubits in state |0...0⟩ (the counting register) + a register
+   holding |ψ⟩.
+2. `H` on all counting qubits → equal superposition.
+3. For each counting qubit j, apply controlled-U^(2^j), controlled by
+   that qubit, onto the |ψ⟩ register. Since |ψ⟩ is an eigenstate, this
+   doesn't change |ψ⟩ — it "injects" the phase e^(2πiφ·2^j) into the
+   amplitude of the superposition branch where qubit j is 1 (phase
+   kickback again, the same mechanism as in Grover's SAT oracle).
+4. After all j, the counting register's state is exactly the QFT of the
+   number k = φ·2ᵗ (when φ·2ᵗ is an integer, which isn't always the
+   case).
+5. Apply the **inverse QFT** — this "decodes" k back into the
+   computational basis. Measurement gives k with high probability (100%
+   if φ is exactly representable in t bits; otherwise, a peak near the
+   nearest k).
 
-## QFT: определение и почему конструкция — не мелочь
+## QFT: definition, and why the construction isn't trivial
 
-QFT переводит базисное состояние |x⟩ в:
+The QFT maps a basis state |x⟩ to:
 
 ```
 QFT|x⟩ = (1/√N) · Σ_y exp(2πi·x·y/N) |y⟩
 ```
 
-Формула простая, но её перевод в конкретную последовательность гейтов
-(порядок обработки кубит, знак угла controlled-phase, и — где именно
-ставить финальные swap'ы: до или после Hadamard/controlled-phase цикла)
-— распространённый источник тихих багов: неправильная версия выглядит
-как QFT (использует те же гейты!), но вычисляет не то, и результат будет
-"почти правильным", но с неправильным распределением вероятностей.
+The formula is simple, but translating it into a specific gate sequence
+(the order in which qubits are processed, the sign of the
+controlled-phase angle, and — where exactly to place the final swaps:
+before or after the Hadamard/controlled-phase cycle) is a common source
+of silent bugs: an incorrect version *looks* like a QFT (it uses the
+same gates!) but computes the wrong thing, and the result comes out
+"almost right," with the wrong probability distribution.
 
-### Как это было проверено
+### How this was verified
 
-Прежде чем писать `qft.py`, была написана независимая numpy-реализация
-(без Qiskit), реализующая QFT через явное применение `H`/controlled-phase/
-`swap` к state vector побитово. Первая попытка (взятая по интуиции из
-общих учебных паттернов) **не совпала** с прямым определением DFT —
-ошибка до 65% по амплитуде. Вместо того чтобы гадать дальше, был сделан
-перебор восьми комбинаций (порядок обработки кубит: forward/reverse; знак
-угла: +/-; положение swap: start/end/none) против прямого вычисления DFT
-по формуле выше — как эталона. Найдено 4 рабочие комбинации (по сути 2
-независимых решения, каждое в двух эквивалентных структурных формах).
+Before writing `qft.py`, an independent numpy implementation (no
+Qiskit) was written, implementing the QFT by explicitly applying
+`H`/controlled-phase/`swap` to the state vector bit by bit. The first
+attempt (based on intuition from generic textbook patterns) **did not
+match** the direct DFT definition — up to 65% amplitude error. Rather
+than keep guessing, all eight combinations were enumerated (qubit
+processing order: forward/reverse; angle sign: +/-; swap position:
+start/end/none) against direct computation of the DFT from the formula
+above, as the reference. Four working combinations were found (really 2
+independent solutions, each in two structurally equivalent forms).
 
-Выбранная и перенесённая в `qft.py` конвенция:
-- **Forward QFT**: swap в начале, затем кубиты обрабатываются в порядке
-  0..t-1, каждый — `H`, затем controlled-phase с **положительным** углом
-  π/2^d от более поздних кубитов.
-- **Inverse QFT**: кубиты обрабатываются в обратном порядке t-1..0, угол
-  **отрицательный**, swap — в конце.
+The convention chosen and ported to `qft.py`:
+- **Forward QFT**: swap at the start, then qubits are processed in order
+  0..t-1, each getting an `H`, followed by controlled-phase with a
+  **positive** angle π/2^d from later qubits.
+- **Inverse QFT**: qubits processed in reverse order t-1..0, angle
+  **negative**, swap at the end.
 
-Обе версии сверены с прямым DFT с ошибкой ~1e-15 (машинная точность) на
-всех 8 базисных состояниях для 3 кубит.
+Both versions were checked against direct DFT with ~1e-15 error (machine
+precision) across all 8 basis states for 3 qubits.
 
-## Проверка QPE целиком
+## Verifying QPE as a whole
 
-После фиксации правильной QFT/inverse-QFT конструкции была прогнана
-полная numpy-симуляция QPE (H на counting-регистр → controlled-phase →
-inverse QFT → измерение) для двух случаев:
+Once the correct QFT/inverse-QFT construction was locked in, a full
+numpy simulation of QPE (H on the counting register → controlled-phase →
+inverse QFT → measurement) was run for two cases:
 
-**φ = 5/8, точно представимо в 3 битах:**
+**φ = 5/8, exactly representable in 3 bits:**
 ```
-k=5 (φ_est=0.625): вероятность = 1.0000   (все остальные k: 0)
+k=5 (φ_est=0.625): probability = 1.0000   (all other k: 0)
 ```
-Детерминированный результат, как и должно быть в этом частном случае.
+A deterministic result, as expected in this special case.
 
-**φ = 0.3, НЕ представимо точно в 3 битах:**
+**φ = 0.3, NOT exactly representable in 3 bits:**
 ```
-k=2 (φ_est=0.25): вероятность = 0.5775   <- пик
-k=3 (φ_est=0.375): вероятность = 0.2593
-... (остаток размазан по другим k)
+k=2 (φ_est=0.25): probability = 0.5775   <- peak
+k=3 (φ_est=0.375): probability = 0.2593
+... (the rest spread across other k)
 ```
-Пик рядом с истинным значением, а не точное попадание — это ожидаемое
-поведение QPE при ограниченной точности (t бит дают разрешение 1/2ᵗ), а
-**не баг**. Разработчик, впервые видящий такой результат, может ошибочно
-принять размазанное распределение за неисправность — стоит явно
-проговаривать это отличие от "детерминированного" случая.
+A peak near the true value, rather than an exact hit — this is expected
+QPE behavior under limited precision (t bits give resolution 1/2ᵗ), and
+**not a bug**. A developer seeing this result for the first time could
+easily mistake the spread-out distribution for a malfunction — worth
+calling out this distinction from the "deterministic" case explicitly.
 
-## ⚠️ Степень проверки перед переносом в Qiskit
+## ⚠️ Degree of verification before porting to Qiskit
 
-Как и с предыдущими файлами, у меня в рабочей среде нет сети для установки
-Qiskit, поэтому итоговый Qiskit-код (`qft.py`, `qpe.py`, `demo_qpe.py`) не
-прогонялся напрямую. Что проверено, а что нет:
+As with previous files, my working environment has no network access to
+install Qiskit, so the final Qiskit code (`qft.py`, `qpe.py`,
+`demo_qpe.py`) hasn't been run directly. What's verified and what isn't:
 
-- **Проверено независимо**: сама математика QFT/inverse-QFT/QPE (numpy,
-  бит-в-бит совпадение с прямым DFT, детерминированный и размазанный
-  случаи QPE — оба ведут себя как и предсказывает теория).
-- **Не проверено напрямую**: конкретные вызовы Qiskit API — `qc.cp()`,
+- **Independently verified**: the QFT/inverse-QFT/QPE math itself
+  (numpy, bit-for-bit match against direct DFT; both the deterministic
+  and spread-out QPE cases behave exactly as theory predicts).
+- **Not verified directly**: the specific Qiskit API calls — `qc.cp()`,
   `Operator(unitary).power()`, `UnitaryGate(...).control(1)`,
-  `qc.compose()`, `qc.append(gate, qubits)` с частичным измерением через
-  классический регистр размера t (а не `measure_all()`, как в предыдущих
-  демо). Особенно стоит присмотреться к порядку кубит в
-  `qc.append(cu, [counting[j], *target])` — если результат окажется не
-  сфокусирован на ожидаемом k, скорее всего проблема тут, а не в самой
-  математике (та уже подтверждена отдельно).
+  `qc.compose()`, `qc.append(gate, qubits)` with partial measurement
+  into a t-sized classical register (rather than `measure_all()`, as in
+  earlier demos). Particularly worth a close look: the qubit ordering in
+  `qc.append(cu, [counting[j], *target])` — if the result ends up not
+  focused on the expected k, this is the most likely culprit, not the
+  math (which has already been confirmed separately).
 
-Прогони `demo_qpe.py` и `demo_qpe.py --inexact` первым и пришли результат.
+Run `demo_qpe.py` and `demo_qpe.py --inexact` first and send me the
+result.
 
-## Использование в проекте
+## Usage in this project
 
 `quantum_core/algorithms/qft.py`:
-- `build_qft_circuit(num_qubits, inverse=False)` — переиспользуемый
-  примитив, не зависит от QPE.
+- `build_qft_circuit(num_qubits, inverse=False)` — a reusable primitive,
+  independent of QPE.
 
 `quantum_core/algorithms/qpe.py`:
-- `controlled_power_gate(unitary, power)` — controlled-U^power через
-  точное матричное возведение в степень (годится для симулятора; для
-  реального железа потребуется другой подход);
+- `controlled_power_gate(unitary, power)` — controlled-U^power via exact
+  matrix exponentiation (fine for a simulator; real hardware would need
+  a different approach);
 - `build_qpe_circuit(unitary, num_counting_qubits, eigenstate_prep)` —
-  собирает полную схему, измеряет только counting-регистр.
+  assembles the full circuit, measures only the counting register.
 
-Оба модуля backend-агностичны — как и `grover.py`/`sat_search.py`, они
-только строят `qiskit.QuantumCircuit`, ничего не знают про то, как и где
-он будет исполняться.
+Both modules are backend-agnostic — like `grover.py`/`sat_search.py`,
+they only build a `qiskit.QuantumCircuit` and know nothing about how or
+where it will be executed.

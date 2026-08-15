@@ -1,169 +1,170 @@
-# Debug/ops-стек: Grafana, Prometheus, Kafka UI, Adminer
+# Debug/ops stack: Grafana, Prometheus, Kafka UI, Adminer
 
-## Зачем отдельно от дашборда экспериментов
+## Why separate from the experiments dashboard
 
-См. `docs/architecture/dashboard.md` — там разбор, почему просмотр
-записей об экспериментах (бизнес/исследовательские данные) не годится
-для Grafana. Этот документ — про обратный случай: операционная
-видимость (глубина очередей, consumer lag, ошибки во времени) — именно
-то, для чего Grafana изначально и задумывалась в этом проекте (см.
-самый первый архитектурный разговор).
+See `docs/architecture/dashboard.md` — it covers why viewing experiment
+records (business/research data) isn't a good fit for Grafana. This
+document covers the opposite case: operational visibility (queue depth,
+consumer lag, error rates over time) — exactly what Grafana was intended
+for in this project from the start (see the very first architecture
+conversation).
 
-Но и тут одной Grafana недостаточно — она визуализирует метрики, а не
-браузит сырые сообщения или SQL-таблицы. Поэтому стек — четыре
-инструмента, каждый в своей роли:
+But Grafana alone isn't enough here either — it visualizes metrics, not
+raw messages or SQL tables. So the stack is four tools, each with its
+own role:
 
-| Инструмент | Роль | Порт |
+| Tool | Role | Port |
 |---|---|---|
-| **Prometheus** | Хранилище time-series метрик, scrape по HTTP | 9090 |
-| **Grafana** | Визуализация метрик + прямые SQL-запросы к Postgres/TimescaleDB | 3000 |
-| **Kafbat UI** | Просмотр Kafka-топиков/сообщений/consumer groups | 8090 |
-| **Adminer** | Ad-hoc SQL-браузер для Postgres/TimescaleDB | 8091 |
+| **Prometheus** | Time-series metrics store, HTTP scrape | 9090 |
+| **Grafana** | Metrics visualization + direct SQL queries against Postgres/TimescaleDB | 3000 |
+| **Kafbat UI** | Browse Kafka topics/messages/consumer groups | 8090 |
+| **Adminer** | Ad-hoc SQL browser for Postgres/TimescaleDB | 8091 |
 
-## Источники метрик
+## Metric sources
 
-- **RabbitMQ** — встроенный `rabbitmq_prometheus` плагин, порт 15692.
-  Включён через смонтированный `infra/rabbitmq/enabled_plugins`
-  (`[rabbitmq_management,rabbitmq_prometheus].`) — **не** через
-  переменную окружения `RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS`, которую
-  предлагают некоторые блоги: это просто Erlang VM-аргумент, он не
-  включает плагин по-настоящему (проверил по официальной документации
-  RabbitMQ, прежде чем выбрать правильный способ).
-- **Kafka** — `kafka_exporter` (danielqsj/kafka-exporter), работает через
-  обычный протокол брокера (`--kafka.server=kafka:9092`), не зависит от
-  Zookeeper/KRaft — совместим с нашим single-broker KRaft-сетапом без
-  оговорок.
-- **Postgres** (метаданные экспериментов) и **TimescaleDB** (телеметрия)
-  — два отдельных экземпляра `postgres_exporter`, каждый указывает на
-  свою БД (`DATA_SOURCE_NAME`) — это разные контейнеры, разные датасеты,
-  не один сервер с двумя базами.
+- **RabbitMQ** — the built-in `rabbitmq_prometheus` plugin, port 15692.
+  Enabled via a mounted `infra/rabbitmq/enabled_plugins`
+  (`[rabbitmq_management,rabbitmq_prometheus].`) — **not** via the
+  `RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS` environment variable some blogs
+  suggest: that's just an Erlang VM argument and doesn't actually enable
+  the plugin (checked against RabbitMQ's official docs before picking
+  the right approach).
+- **Kafka** — `kafka_exporter` (danielqsj/kafka-exporter), talks the
+  regular broker protocol (`--kafka.server=kafka:9092`), doesn't depend
+  on Zookeeper/KRaft — compatible with our single-broker KRaft setup
+  with no caveats.
+- **Postgres** (experiment metadata) and **TimescaleDB** (telemetry) —
+  two separate `postgres_exporter` instances, each pointed at its own
+  DB (`DATA_SOURCE_NAME`) — these are different containers, different
+  datasets, not one server with two databases.
 
-## Kafka UI: важный выбор образа
+## Kafka UI: an important image choice
 
-Использован `ghcr.io/kafbat/kafka-ui`, **не** `provectuslabs/kafka-ui`
-(оригинальный проект). Provectus приостановил разработку в сентябре 2023
-и оставил непропатченную RCE-уязвимость примерно на полгода, прежде чем
-сообщество сделало форк под `kafbat/kafka-ui` — сейчас это активно
-поддерживаемое продолжение. Тот же паттерн, что уже был с `faust` →
-`faust-streaming` в этом проекте: проверил актуальность/поддержку перед
-тем как закладывать зависимость, а не взял первое, что подсказывает
-память.
+Used `ghcr.io/kafbat/kafka-ui`, **not** `provectuslabs/kafka-ui` (the
+original project). Provectus paused development in September 2023 and
+left an unpatched RCE vulnerability sitting for roughly six months
+before the community forked it as `kafbat/kafka-ui` — that's now the
+actively maintained continuation. Same pattern as `faust` →
+`faust-streaming` elsewhere in this project: checked currency/support
+before taking on a dependency, rather than going with whatever memory
+suggested first.
 
-## Grafana: что автоматически, что вручную
+## Grafana: what's automated, what's manual
 
-**Автоматически** (через `infra/grafana/provisioning/`):
-- 3 datasource: Prometheus, Postgres (experiments), TimescaleDB (telemetry)
-  — подключены и готовы к запросам сразу после старта, без единого клика
-  в UI.
+**Automated** (via `infra/grafana/provisioning/`):
+- 3 datasources: Prometheus, Postgres (experiments), TimescaleDB
+  (telemetry) — connected and ready to query immediately after startup,
+  with zero clicks in the UI.
 
-**Вручную** (сознательно не стал автоматизировать):
-- Сами дашборды (панели/графики) — provisioning для дашбордов настроен
-  (`infra/grafana/provisioning/dashboards/`, папка пока пустая), но
-  готовый JSON дашборда — версионно-чувствительная штука, которую я не
-  могу протестировать в своей среде (нет Grafana). Вместо того чтобы
-  рисковать сломанным hand-crafted JSON, проще импортировать готовый
-  community-дашборд через UI:
+**Manual** (deliberately not automated):
+- The dashboards themselves (panels/graphs) — provisioning for
+  dashboards is set up (`infra/grafana/provisioning/dashboards/`, folder
+  currently empty), but a ready-made dashboard JSON is a version-
+  sensitive thing I can't test in my environment (no Grafana). Rather
+  than risk a broken hand-crafted JSON, it's simpler to import a
+  ready-made community dashboard through the UI:
   - **Kafka Exporter Overview** — Grafana Dashboard ID `7589`
-    (Import → By ID → `7589` → выбрать datasource `Prometheus`);
-  - Для RabbitMQ и Postgres/TimescaleDB — поищи в Grafana's "Import
-    dashboard" по названию exporter'а, там десятки готовых community
-    дашбордов с разной степенью актуальности — выбери с недавним
-    обновлением.
-- Свои панели для `calibration_events` (например, "error_rate за
-  последний час") — быстрее всего собрать через Grafana Explore
-  (datasource `TimescaleDB (telemetry)`), сохранить как панель, когда
-  устроит.
+    (Import → By ID → `7589` → pick the `Prometheus` datasource);
+  - For RabbitMQ and Postgres/TimescaleDB — search Grafana's "Import
+    dashboard" by exporter name; there are dozens of ready community
+    dashboards with varying degrees of currency — pick one with a
+    recent update.
+- Custom panels for `calibration_events` (e.g. "error_rate over the
+  last hour") — fastest to build via Grafana Explore (datasource
+  `TimescaleDB (telemetry)`), then save as a panel once it looks right.
 
-## Как запустить
+## How to run it
 
-Всё поднимается вместе с остальным стеком:
+Everything comes up together with the rest of the stack:
 ```bash
 ./dev.sh
 ```
 
-⚠️ У Grafana/Prometheus/exporter'ов нет проверенного мной exec-based
-healthcheck (в отличие от `pg_isready`/`rabbitmq-diagnostics`, которые
-уже использовались и подтверждены) — `dev.sh` не ждёт их готовности
-строго, просто печатает адреса в конце. Обычно поднимаются за несколько
-секунд после того, как остальной стек уже готов.
+⚠️ Grafana/Prometheus/the exporters don't have an exec-based healthcheck
+I've verified (unlike `pg_isready`/`rabbitmq-diagnostics`, which are
+already used and confirmed) — `dev.sh` doesn't strictly wait for them to
+be ready, it just prints the addresses at the end. They usually come up
+within a few seconds after the rest of the stack is already ready.
 
-## Kafka: dual listener (найденный и исправленный баг)
+## Kafka: dual listener (a bug found and fixed)
 
-Первая версия конфигурации использовала один listener
-(`PLAINTEXT://localhost:9092`) — работало для host-процессов этого
-проекта (`api`/`orchestrator`/`stream-analytics`/`scripts/observe.py`
-всегда запускаются на хосте, никогда не докеризованы), но **не** для
-`kafka-exporter`/`kafka-ui`, которые впервые в этом проекте общаются
-именно через Docker-сеть между контейнерами. Механизм поломки: Kafka
-после первого handshake сообщает клиенту "advertised" адрес для
-дальнейшей работы; если этот адрес — `localhost:9092`, контейнер-клиент
-(у которого `localhost` — это он сам) пытается переподключиться сам к
-себе и падает сразу после handshake.
+The first version of the configuration used a single listener
+(`PLAINTEXT://localhost:9092`) — this worked for this project's
+host processes (`api`/`orchestrator`/`stream-analytics`/
+`scripts/observe.py` always run on the host, never dockerized), but
+**not** for `kafka-exporter`/`kafka-ui`, which are the first things in
+this project to talk to each other over the Docker network between
+containers. The failure mechanism: after the initial handshake, Kafka
+tells the client an "advertised" address to use going forward; if that
+address is `localhost:9092`, a container-side client (for which
+`localhost` means itself) tries to reconnect to itself and fails right
+after the handshake.
 
-Это ровно тот риск, который был заранее отмечен ниже (до реального
-прогона) — "critical setting is `KAFKA_ADVERTISED_LISTENERS`" — и теперь
-подтверждён на практике. Исправлено через два отдельных listener'а:
-`PLAINTEXT_INTERNAL` (advertised как `kafka:29092`, для контейнеров) и
-`PLAINTEXT_EXTERNAL` (advertised как `localhost:9092`, для host-процессов,
-как было раньше). `kafka-exporter`/`kafka-ui` переключены на
-`kafka:29092`; ничего в host-процессах менять не пришлось — они и так
-шли через `localhost:9092`, который не изменился.
+This is exactly the risk flagged ahead of time (before the real run) —
+"critical setting is `KAFKA_ADVERTISED_LISTENERS`" — and it's now been
+confirmed in practice. Fixed with two separate listeners:
+`PLAINTEXT_INTERNAL` (advertised as `kafka:29092`, for containers) and
+`PLAINTEXT_EXTERNAL` (advertised as `localhost:9092`, for host
+processes, as before). `kafka-exporter`/`kafka-ui` were switched to
+`kafka:29092`; nothing needed to change on the host processes — they
+were already going through `localhost:9092`, which is unchanged.
 
-## Диагностика, если данных всё ещё нет
+## Troubleshooting if there's still no data
 
-**Prometheus** (http://localhost:9090/targets) — первым делом сюда:
-показывает по каждому target'у статус UP/DOWN и текст последней ошибки
-scrape напрямую, вместо гадания.
+**Prometheus** (http://localhost:9090/targets) — check here first: it
+shows the UP/DOWN status for every target plus the exact text of the
+last scrape error, instead of guessing.
 
-Если конкретный target всё ещё DOWN:
-- `docker compose logs <service>` — почти всегда там есть точная причина;
+If a specific target is still DOWN:
+- `docker compose logs <service>` — almost always has the exact cause;
 - **RabbitMQ**: `docker compose logs rabbitmq | grep -i prometheus` —
-  должна быть строка о загрузке `rabbitmq_prometheus`. Если нет — файл
-  `infra/rabbitmq/enabled_plugins` не примонтировался (проверь, что он
-  реально существует как файл, а не создался как пустая директория —
-  такое бывает у Docker, если хост-путь не существовал на момент
-  `docker compose up`). Проверка напрямую: `curl http://localhost:15692/metrics`;
-- **postgres-exporter/timescaledb-exporter**: `DATA_SOURCE_NAME` не
-  требует dual-listener подхода (Postgres wire-протокол не делает
-  advertised-address redirect, в отличие от Kafka) — если всё равно не
-  работает, самая вероятная причина — `depends_on: condition:
-  service_healthy` не дождался (проверь `docker compose ps`, что БД
-  реально healthy, не просто running).
+  there should be a line about loading `rabbitmq_prometheus`. If not,
+  the `infra/rabbitmq/enabled_plugins` file didn't get mounted (check
+  that it actually exists as a file, not an empty directory that Docker
+  created — this can happen if the host path didn't exist at
+  `docker compose up` time). Check directly:
+  `curl http://localhost:15692/metrics`;
+- **postgres-exporter/timescaledb-exporter**: `DATA_SOURCE_NAME` doesn't
+  need the dual-listener approach (the Postgres wire protocol doesn't do
+  advertised-address redirects, unlike Kafka) — if it still doesn't
+  work, the most likely cause is `depends_on: condition:
+  service_healthy` not having been satisfied (check `docker compose ps`
+  to confirm the DB is actually healthy, not just running).
 
-**Grafana "нет данных"** — не всегда то же самое, что "Prometheus не
-собирает метрики". Возможны оба случая параллельно:
-1. Данных в Prometheus действительно нет (см. выше) — тогда Grafana
-   физически нечего показать;
-2. Данные в Prometheus есть, но в Grafana просто **нет ни одного
-   дашборда** — я сознательно не стал провижинить дашборд-JSON заранее
-   (см. ниже, "что вручную"). Проверка: Configuration → Data Sources →
-   открыть каждый → кнопка "Save & Test" — если зелёная галочка,
-   datasource подключён и дело именно в отсутствии дашборда, а не в
-   связности.
+**Grafana "no data"** isn't always the same thing as "Prometheus isn't
+collecting metrics." Both can be true at once:
+1. There's genuinely no data in Prometheus (see above) — then Grafana
+   physically has nothing to show;
+2. There's data in Prometheus, but Grafana simply **has no dashboard at
+   all** — I deliberately didn't pre-provision dashboard JSON (see "what's
+   manual" above). To check: Configuration → Data Sources → open each
+   one → "Save & Test" button — a green checkmark means the datasource
+   is connected and the issue is a missing dashboard, not connectivity.
 
-## ⚠️ Степень проверки
+## ⚠️ Degree of verification
 
-Первая версия этого стека была написана без доступа к Docker в моей
-среде — что можно было проверить статически, проверено (все YAML —
-через `pyyaml`, три места с риском копирования нерабочего паттерна из
-блогов — отдельно верифицированы перед написанием кода):
-1. Способ включения `rabbitmq_prometheus` — распространённый в блогах
-   ENV-трюк не работает, использован официально документированный способ
-   (`enabled_plugins`-файл);
-2. Совместимость `kafka_exporter` с KRaft — подтверждена (работает через
-   протокол брокера, не завязан на Zookeeper);
-3. Актуальность образа Kafka UI — оригинальный `provectuslabs/kafka-ui`
-   заброшен с известной непропатченной уязвимостью, использован
-   поддерживаемый форк `kafbat/kafka-ui`.
+The first version of this stack was written without Docker access in my
+environment — whatever could be checked statically, was checked (all
+YAML validated via `pyyaml`; three spots with a risk of copying a
+non-working pattern from blog posts were separately verified before
+writing the code):
+1. How to enable `rabbitmq_prometheus` — the common blog ENV-variable
+   trick doesn't work; used the officially documented approach (the
+   `enabled_plugins` file);
+2. `kafka_exporter` compatibility with KRaft — confirmed (works over the
+   broker protocol, not tied to Zookeeper);
+3. Currency of the Kafka UI image — the original
+   `provectuslabs/kafka-ui` is abandoned with a known unpatched
+   vulnerability; used the maintained `kafbat/kafka-ui` fork instead.
 
-При первом реальном прогоне (уже на реальном Docker) обнаружился
-четвёртый, более серьёзный баг — dual-listener проблема Kafka (см. выше)
-— который в принципе не мог быть пойман статической проверкой, только
-реальным запуском: это первый код в проекте, где контейнеры реально
-общаются друг с другом через Docker-сеть, а не через `localhost` с хоста.
-Исправлено и задокументировано выше.
+On the first real run (already against real Docker), a fourth, more
+serious bug turned up — the Kafka dual-listener issue (see above) —
+which couldn't have been caught by static checking in principle, only
+by an actual run: this is the first code in the project where containers
+genuinely talk to each other over the Docker network, rather than via
+`localhost` from the host.  Fixed and documented above.
 
-Прогони `docker compose up -d` (или `./dev.sh`) заново с исправленным
-`docker-compose.yml`, открой http://localhost:9090/targets — все 5
-target'ов должны быть UP. Если что-то всё ещё DOWN — см. диагностику
-выше.
+Run `docker compose up -d` (or `./dev.sh`) again with the fixed
+`docker-compose.yml`, then open http://localhost:9090/targets — all 5
+targets should show UP. If something is still DOWN, see the
+troubleshooting section above.

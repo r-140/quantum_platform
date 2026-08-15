@@ -1,195 +1,200 @@
 # Grover's algorithm
 
-## Задача
+## The problem
 
-Дано N = 2ⁿ записей без индекса (например, строки таблицы), и есть способ
-проверить один кандидат на соответствие критерию поиска — это и есть
-"оракул". Классически в среднем нужно N/2 проверок. Grover находит нужную
-запись за O(√N) обращений к оракулу — квадратичное ускорение.
+Given N = 2ⁿ unindexed records (e.g. table rows), and a way to check
+whether a single candidate matches a search criterion — that's the
+"oracle." Classically, this takes N/2 checks on average. Grover finds
+the target record in O(√N) oracle calls — a quadratic speedup.
 
-Это не замена SQL-индексу для реальных БД сегодняшнего дня (там оракул как
-раз и есть индекс — O(log N) без всякой квантовой механики). Ценность
-Grover — там, где проверка кандидата дорогая и не поддаётся индексации:
-SAT-решатели, криптоанализ (brute-force поиск ключа), задачи
-удовлетворения ограничений.
+This isn't a replacement for a SQL index in today's real databases (there
+the oracle *is* the index — O(log N) with no quantum mechanics needed).
+Grover's value shows up where checking a candidate is expensive and
+doesn't lend itself to indexing: SAT solvers, cryptanalysis (brute-force
+key search), constraint-satisfaction problems.
 
-## Как работает (интуитивно)
+## How it works (intuitively)
 
-1. **Суперпозиция**: `H` на всех кубитах — равная амплитуда на всех N
-   состояниях.
-2. **Оракул**: переворачивает знак амплитуды у "отмеченных" состояний
-   (тех, что удовлетворяют критерию поиска). Амплитуда остаётся той же по
-   модулю — визуально ничего не меняется при измерении сразу после этого
-   шага.
-3. **Диффузор** (inversion about the mean): отражает все амплитуды
-   относительно среднего значения. Поскольку у отмеченных состояний знак
-   отрицательный, после отражения их амплитуда становится заметно больше
-   средней — вероятность их измерить растёт.
-4. Шаги 2-3 повторяются `⌊(π/4)·√(N/M)⌋` раз (M — число отмеченных
-   состояний). Это оптимум: **больше итераций не значит лучше** — после
-   оптимума амплитуда "перекручивается" обратно и вероятность успеха
-   падает. Частая ошибка в реализациях — жёстко зашитое большое число
-   итераций вместо расчёта оптимума под конкретный N.
+1. **Superposition**: `H` on every qubit — equal amplitude across all N
+   states.
+2. **Oracle**: flips the sign of the amplitude for "marked" states (the
+   ones satisfying the search criterion). The amplitude's magnitude
+   stays the same — visually, nothing changes if you measure right after
+   this step.
+3. **Diffuser** (inversion about the mean): reflects all amplitudes
+   about the mean value. Since the marked states now have a negative
+   sign, after the reflection their amplitude becomes noticeably larger
+   than average — the probability of measuring them grows.
+4. Steps 2-3 repeat `⌊(π/4)·√(N/M)⌋` times (M being the number of marked
+   states). This is the optimum: **more iterations isn't better** —
+   past the optimum, the amplitude "overshoots" back down and the
+   success probability drops. A common implementation mistake is
+   hardcoding a large iteration count instead of computing the optimum
+   for the specific N.
 
-## Конструкция оракула/диффузора в коде
+## Oracle/diffuser construction in the code
 
-Оба шага реализованы через multi-controlled Z (`_apply_mcz` в
-`grover.py`), построенный как `H` – `mcx` – `H` на последнем кубите, а не
-через готовые Qiskit-хелперы (`PhaseOracle`/`MCMT`) — это избегает
-опциональной зависимости от `tweedledum`, которая не нужна для такой
-простой конструкции.
+Both steps are implemented via a multi-controlled Z (`_apply_mcz` in
+`grover.py`), built as `H` – `mcx` – `H` on the last qubit, rather than
+via Qiskit's ready-made helpers (`PhaseOracle`/`MCMT`) — this avoids an
+optional dependency on `tweedledum`, which isn't needed for a
+construction this simple.
 
-Оракул для конкретного отмеченного состояния: `X`-гейты на кубитах, где в
-целевой строке стоит `0` (чтобы целевое состояние превратилось в
-"все единицы"), затем MCZ, затем те же `X` обратно.
+The oracle for a specific marked state: `X` gates on the qubits where the
+target string has a `0` (so the target state turns into "all ones"),
+then MCZ, then the same `X`s again to undo them.
 
-## Проверка корректности
+## Correctness verification
 
-Перед переносом в Qiskit сама математика (оракул + диффузор как матрицы)
-была независимо проверена через прямое умножение матриц в numpy — без
-Qiskit — для n=3, одного отмеченного состояния `101`:
+Before porting to Qiskit, the math itself (oracle + diffuser as
+matrices) was independently verified via direct matrix multiplication in
+numpy — no Qiskit — for n=3, one marked state, `101`:
 
 ```
 optimal_iterations = 2
-вероятность на '101': 94.5%   (случайное угадывание дало бы 12.5%)
+probability on '101': 94.5%   (random guessing would give 12.5%)
 ```
 
-Это подтверждает корректность самой логики алгоритма отдельно от
-корректности конкретных вызовов Qiskit API.
+This confirms the algorithm's logic is correct independently of whether
+the specific Qiskit API calls are correct.
 
-## Сложность
+## Complexity
 
-| n (кубиты) | N = 2ⁿ | Grover-итерации | Классические проверки (в среднем) |
+| n (qubits) | N = 2ⁿ | Grover iterations | Classical checks (average) |
 |---|---|---|---|
 | 3  | 8     | 2   | 4       |
 | 10 | 1024  | 25  | 512     |
 | 20 | ~1M   | ~805 | ~524288 |
 
-## Использование в проекте
+## Usage in this project
 
 `quantum_core/algorithms/grover.py`:
-- `GroverProblem(num_qubits, marked_states)` — описание задачи;
-- `optimal_iterations(num_qubits, num_marked)` — расчёт оптимума;
-- `build_grover_circuit(problem, iterations=None)` — возвращает
-  `qiskit.QuantumCircuit`, готовый к передаче в `Circuit.payload` для
-  `AerBackend` (см. `demo_grover.py`).
+- `GroverProblem(num_qubits, marked_states)` — describes the problem;
+- `optimal_iterations(num_qubits, num_marked)` — computes the optimum;
+- `build_grover_circuit(problem, iterations=None)` — returns a
+  `qiskit.QuantumCircuit`, ready to pass into `Circuit.payload` for
+  `AerBackend` (see `demo_grover.py`).
 
-Не привязан к конкретному backend'у — можно гонять и на `AerBackend`, и в
-будущем на реальном железе через тот же интерфейс `QuantumBackend`.
+Not tied to a specific backend — can run on `AerBackend` today and, in
+the future, on real hardware through the same `QuantumBackend`
+interface.
 
-⚠️ **Важная оговорка про эту версию**: здесь оракул строится через
-X-гейты, которые *заранее знают* искомое состояние (`marked_states`
-передаётся в конструктор). Это отличная демонстрация механики amplitude
-amplification, но это **не поиск** в строгом смысле — ответ уже известен
-программисту. Считай этот файл "hello world" для Grover. Настоящий поиск —
-в `sat_search.py` ниже.
+⚠️ **Important caveat about this version**: here the oracle is built
+using X gates that *already know* the target state (`marked_states` is
+passed into the constructor). This is a great demonstration of amplitude
+amplification mechanics, but it's **not a search** in the strict sense —
+the programmer already knows the answer. Think of this file as the
+"hello world" for Grover. The real search is in `sat_search.py` below.
 
-## SAT-версия: настоящий поиск по критерию
+## The SAT version: genuine criterion-based search
 
-`quantum_core/algorithms/sat_search.py` реализует более реалистичный
-случай: у нас есть не заранее известный ответ, а **критерий проверки** —
-булево выражение над именованными переменными (например,
-`"(x0 | x1) & (~x1 | x2) & (x0 | ~x3)"`, стандартный вид условия для
-SAT/3-SAT). Оракул строится через `PhaseOracleGate` из Qiskit — он парсит
-такое выражение и сам собирает фазовую схему, без ручных X-гейтов.
+`quantum_core/algorithms/sat_search.py` implements a more realistic
+case: instead of a known answer, we have a **checking criterion** — a
+boolean expression over named variables (e.g.
+`"(x0 | x1) & (~x1 | x2) & (x0 | ~x3)"`, the standard form for SAT/3-SAT
+conditions). The oracle is built via Qiskit's `PhaseOracleGate` — it
+parses this kind of expression and assembles the phase circuit itself,
+with no manual X gates.
 
-Это гораздо ближе к тому, зачем Grover нужен на практике: SAT-солверы,
-брутфорс криптографических ключей, задачи удовлетворения ограничений —
-везде, где легко *проверить* кандидата, но неизвестно, какой из них
-подходит, и сколько вообще подходящих существует.
+This is much closer to why Grover matters in practice: SAT solvers,
+brute-forcing cryptographic keys, constraint-satisfaction problems —
+anywhere it's easy to *check* a candidate but you don't know which one
+fits, or even how many fit at all.
 
-### Универсальный принцип построения оракула — и его границы
+### The general oracle-construction method — and its limits
 
-Оракул не строится "автоматически из любой функции" — но существует
-универсальный **метод**, восходящий к конструкции Беннета (1973): любую
-классически вычислимую булеву функцию можно механически превратить в
-обратимую квантовую схему — заменить каждый классический гейт на
-Toffoli-эквивалент, разобрать ("uncompute") весь промежуточный "мусор"
-после вычисления, применить phase kickback через вспомогательный кубит в
-состоянии `|−⟩`. `PhaseOracleGate` — это готовая реализация именно этого
-метода для булевых выражений (AND/OR/NOT/XOR).
+An oracle isn't built "automatically from any function" — but there is a
+general **method**, going back to Bennett's 1973 construction: any
+classically computable boolean function can be mechanically turned into
+a reversible quantum circuit — replace every classical gate with its
+Toffoli equivalent, "uncompute" all the intermediate garbage after the
+computation, and apply phase kickback through an ancilla qubit in state
+`|−⟩`. `PhaseOracleGate` is a ready-made implementation of exactly this
+method for boolean expressions (AND/OR/NOT/XOR).
 
-Это **не** значит, что любая мыслимая функция одинаково легко ложится в
-оракул:
-- **Логические условия** (SAT-клозы) — переводятся почти механически.
-- **Арифметические условия** ("x делится на 3") — требуют настоящих
-  обратимых схем сложения/умножения, что заметно объёмнее.
-- **Непрерывные/аналитические критерии** (точки перегиба функции,
-  разложение в ряд, вычеты комплексной функции) — требуют сначала
-  дискретизации (fixed-point представление), и даже после этого встаёт
-  более фундаментальный вопрос: у таких задач обычно **есть структура**
-  (гладкость, периодичность, аналитичность), которую классические методы
-  (метод Ньютона, FFT, контурное интегрирование) уже эффективно
-  используют. Grover — алгоритм для *неструктурированного* поиска, то
-  есть он специально игнорирует любую структуру f. Заталкивать
-  структурированную задачу в Grover означает выбросить эту структуру и
-  почти всегда проигрывать специализированным методам.
+That does **not** mean any conceivable function fits equally easily into
+an oracle:
+- **Logical conditions** (SAT clauses) — translate almost mechanically.
+- **Arithmetic conditions** ("x is divisible by 3") — require real
+  reversible addition/multiplication circuits, which are noticeably
+  bulkier.
+- **Continuous/analytic criteria** (inflection points of a function,
+  series expansion, residues of a complex function) — first require
+  discretization (fixed-point representation), and even then a more
+  fundamental question arises: such problems usually **have structure**
+  (smoothness, periodicity, analyticity) that classical methods
+  (Newton's method, FFT, contour integration) already exploit
+  efficiently. Grover is an algorithm for *unstructured* search — it
+  specifically ignores any structure in f. Forcing a structured problem
+  into Grover means throwing that structure away, and it will almost
+  always lose to specialized methods.
 
-### Grover — это не Шор в миниатюре
+### Grover is not a miniature Shor's algorithm
 
-Может показаться, что поиск периода в алгоритме Шора — частный случай
-Grover ("тот же критерий: удовлетворяет ли число x..."). Это не так, и
-разница принципиальная:
-- **Grover** — геометрическое вращение в 2D-подпространстве амплитуд
-  (marked/unmarked), даёт **квадратичное** ускорение O(√N), работает для
-  *любого* чёрного ящика без всякой структуры.
-- **QPE/Шор** — оценка фазы собственного значения унитарного оператора
-  через конструктивную интерференцию (QFT), даёт **экспоненциальное**
-  ускорение, но только потому что эксплуатирует конкретную алгебраическую
-  структуру модульного экспоненцирования (периодичность).
+It might look like the period-finding step in Shor's algorithm is a
+special case of Grover ("same criterion: does x satisfy..."). That's not
+the case, and the difference is fundamental:
+- **Grover** — a geometric rotation in a 2D subspace of amplitudes
+  (marked/unmarked), gives a **quadratic** O(√N) speedup, works for
+  *any* black box with no structure at all.
+- **QPE/Shor** — estimates the phase of a unitary operator's eigenvalue
+  via constructive interference (QFT), gives an **exponential** speedup,
+  but only because it exploits a specific algebraic structure of modular
+  exponentiation (periodicity).
 
-Если бы поиск периода реально сводился к Grover-поиску кандидатов
-("проверить: a^r mod N == 1"), ускорение было бы квадратичным, а не
-экспоненциальным. Экспоненциальный разрыв — прямое доказательство, что
-это разные семейства алгоритмов (amplitude amplification vs
-Fourier/spectral methods), а не один частный случай другого.
+If period-finding really did reduce to Grover search over candidates
+("check: a^r mod N == 1"), the speedup would be quadratic, not
+exponential. That exponential gap is direct proof that these are
+different families of algorithms (amplitude amplification vs.
+Fourier/spectral methods), not one being a special case of the other.
 
-### QRAM: ограничение для поиска по "реальной базе данных"
+### QRAM: a limitation for searching a "real database"
 
-Часто Grover воспринимают как "квадратичное ускорение для поиска в базе
-данных" — это тоже требует оговорки. Grover работает с *индексами*
-(суперпозиция по адресам `|i⟩`), а не с содержимым записей. Если критерий
-— вычисляемая функция от индекса (как в SAT-примере выше), всё честно
-работает. Но если нужно искать по **содержимому** классической базы
-данных, нужен механизм, который по индексу `|i⟩` эффективно (в идеале
-O(log N), а не O(N)) загружает соответствующие данные `|data(i)⟩` в
-кубиты — это называется **QRAM** (quantum random access memory).
-Практичного QRAM сегодня не существует. Это одна из причин, по которой
-квадратичное ускорение Grover для "поиска в базе" часто остаётся
-теоретическим, а не практическим результатом.
+Grover is often thought of as "a quadratic speedup for database search"
+— that too needs a caveat. Grover operates on *indices* (a superposition
+over addresses `|i⟩`), not on record contents. If the criterion is a
+computable function of the index (as in the SAT example above), this all
+works honestly. But if you need to search by the **contents** of a
+classical database, you need a mechanism that, given an index `|i⟩`,
+efficiently (ideally O(log N), not O(N)) loads the corresponding data
+`|data(i)⟩` into qubits — this is called **QRAM** (quantum random-access
+memory). No practical QRAM exists today. This is one reason Grover's
+quadratic speedup for "database search" often remains a theoretical
+result rather than a practical one.
 
-### Неизвестное число решений
+### Unknown number of solutions
 
-`optimal_iterations()` требует знать число решений M заранее.
-`BooleanSearchProblem.count_solutions()` в `sat_search.py` считает M
-перебором — это честно работает только потому, что демо-задача крошечная
-(4 переменные, 16 состояний). В реальном случае перебор всех вариантов
-свёл бы на нет весь смысл использования Grover.
+`optimal_iterations()` needs to know the number of solutions M ahead of
+time. `BooleanSearchProblem.count_solutions()` in `sat_search.py`
+computes M by brute force — this only works honestly because the demo
+problem is tiny (4 variables, 16 states). In a real case, brute-forcing
+all combinations would defeat the entire point of using Grover.
 
-Настоящее решение этой проблемы — **адаптивный поиск** (техника
-Boyer-Brassard-Høyer-Tapp, 1998): вместо фиксированного числа итераций
-берётся случайное число итераций из растущего диапазона (1, затем
-случайно из [0,2), [0,4), [0,8)...), после каждой попытки результат
-классически проверяется (это дешёво — O(1) проверка предиката), и если
-не подошёл — диапазон увеличивается. Матожидание числа обращений к
-оракулу остаётся O(√N/M) даже без знания M заранее. В этом проекте
-адаптивный поиск пока не реализован — оставлен как заметка на будущее,
-не должен уйти в бэклог навсегда, так как это и есть по-настоящему
-"честная" версия Grover без classical preprocessing.
+The real solution to this problem is **adaptive search** (the
+Boyer-Brassard-Høyer-Tapp technique, 1998): instead of a fixed iteration
+count, take a random number of iterations from a growing range (1, then
+random from [0,2), [0,4), [0,8)...), classically check the result after
+each attempt (this is cheap — an O(1) predicate check), and if it
+doesn't fit, grow the range. The expected number of oracle calls stays
+O(√N/M) even without knowing M ahead of time. Adaptive search isn't
+implemented in this project yet — left as a note for later, and one that
+shouldn't sit in the backlog forever, since this is what makes Grover
+truly "honest" without classical preprocessing.
 
-## Использование в проекте (SAT-версия)
+## Usage in this project (SAT version)
 
 `quantum_core/algorithms/sat_search.py`:
-- `BooleanSearchProblem(variables, expression)` — описание задачи через
-  критерий, а не готовый ответ;
-- `eval_boolean_expression()` — классический evaluator (используется и
-  для brute-force подсчёта M, и для проверки квантового результата);
-- `build_sat_grover_circuit(problem, iterations)` — строит схему через
-  `PhaseOracleGate`, без ручных X-гейтов.
+- `BooleanSearchProblem(variables, expression)` — describes the problem
+  via a criterion, not a ready-made answer;
+- `eval_boolean_expression()` — a classical evaluator (used both for
+  brute-force counting of M and for checking the quantum result);
+- `build_sat_grover_circuit(problem, iterations)` — builds the circuit
+  via `PhaseOracleGate`, with no manual X gates.
 
-⚠️ **Степень проверки**: классический evaluator (`eval_boolean_expression`,
-`count_solutions`) проверен и сверен с независимой brute-force реализацией
-— 7 решений на 16 комбинациях, совпадение подтверждено. Сама интеграция с
-`PhaseOracleGate` и порядок кубит/переменных — не прогонялись через
-реальный Qiskit (нет сети в моей среде). Прогони `demo_sat_grover.py`
-первым и пришли результат.
+⚠️ **Degree of verification**: the classical evaluator
+(`eval_boolean_expression`, `count_solutions`) was verified against an
+independent brute-force implementation — 7 solutions out of 16
+combinations, match confirmed. The actual integration with
+`PhaseOracleGate`, and the qubit/variable ordering, haven't been run
+against real Qiskit (no network in my environment). Run
+`demo_sat_grover.py` first and send me the result.

@@ -1,29 +1,30 @@
-# VQE: энергия основного состояния H₂
+# VQE: ground-state energy of H₂
 
-## Задача
+## The problem
 
-Найти энергию основного состояния молекулы водорода (H₂) при межатомном
-расстоянии 0.75 Å — классическая "первая" задача квантовой химии на
-квантовом компьютере, и естественное продолжение QPE (`qft_qpe.md`): та
-же цель (найти собственное значение гамильтониана), но другой инструмент.
+Find the ground-state energy of the hydrogen molecule (H₂) at an
+interatomic distance of 0.75 Å — the classic "first" quantum-chemistry
+problem on a quantum computer, and a natural follow-on to QPE
+(`qft_qpe.md`): the same goal (find an eigenvalue of the Hamiltonian),
+but a different tool.
 
-## Почему VQE, а не QPE, для этой задачи
+## Why VQE, not QPE, for this problem
 
-QPE даёт точный ответ, но требует реализовать U = e^(-iHt) как схему
-(Hamiltonian simulation через Trotterization) — глубокую и требовательную
-к числу кубит конструкцию, которая на сегодняшнем NISQ-железе для
-реальных молекул часто попросту недостижима. VQE вместо этого перекладывает
-основную сложность на классический оптимизатор: квантовая часть остаётся
-неглубокой (несколько гейтов), а "поиск" происходит классически, через
-итеративную подстройку параметров схемы. Это и есть тот компромисс,
-который делает VQE рабочим инструментом уже сегодня, а не только в теории.
+QPE gives an exact answer, but requires implementing U = e^(-iHt) as a
+circuit (Hamiltonian simulation via Trotterization) — a deep,
+qubit-hungry construction that's often simply out of reach for real
+molecules on today's NISQ hardware. VQE instead offloads most of the
+complexity onto a classical optimizer: the quantum part stays shallow (a
+handful of gates), and the "search" happens classically, through
+iterative tuning of the circuit's parameters. This is exactly the
+tradeoff that makes VQE a usable tool today, not just in theory.
 
-## Гамильтониан
+## The Hamiltonian
 
-Взят из O'Malley et al., *Scalable Quantum Simulation of Molecular
-Energies*, Phys. Rev. X 6, 031007 (2016), Table 1 — H₂ на расстоянии
-0.75 Å, после отображения Bravyi-Kitaev и redukции по симметрии до 2
-кубит:
+Taken from O'Malley et al., *Scalable Quantum Simulation of Molecular
+Energies*, Phys. Rev. X 6, 031007 (2016), Table 1 — H₂ at a distance of
+0.75 Å, after Bravyi-Kitaev mapping and symmetry reduction down to 2
+qubits:
 
 ```
 H = g0·I + g1·Z0 + g2·Z1 + g3·Z0Z1 + g4·Y0Y1 + g5·X0X1
@@ -31,137 +32,141 @@ H = g0·I + g1·Z0 + g2·Z1 + g3·Z0Z1 + g4·Y0Y1 + g5·X0X1
 g0 = -0.4804   g1 = +0.3435   g2 = -0.4347
 g3 = +0.5716   g4 = +0.0910   g5 = +0.0910
 ```
-плюс энергия ядерного отталкивания (nuclear repulsion) 0.7055696146
-Hartree, которая прибавляется к результату отдельно (не входит в
-электронную часть гамильтониана выше).
+plus a nuclear-repulsion energy of 0.7055696146 Hartree, added to the
+result separately (not part of the electronic Hamiltonian above).
 
-### Проверка коэффициентов
+### Verifying the coefficients
 
-Прежде чем строить что-либо в Qiskit, коэффициенты были проверены прямой
-диагонализацией 4×4 матрицы в numpy — независимо от Qiskit и от источника
-цитирования:
+Before building anything in Qiskit, the coefficients were verified via
+direct diagonalization of the 4×4 matrix in numpy — independent of
+Qiskit and of the citation source:
 
 ```
-Собственные значения H (электронная часть): -1.851199, -0.252801, 0.0, 0.182400
+Eigenvalues of H (electronic part): -1.851199, -0.252801, 0.0, 0.182400
 + nuclear repulsion: -1.145630 Hartree
-Известное литературное значение: ~-1.137 Hartree
+Known literature value: ~-1.137 Hartree
 ```
 
-Совпадение в пределах 0.01 Hartree — этого достаточно, чтобы доверять
-источнику коэффициентов (небольшая остаточная разница, вероятно,
-из-за округления коэффициентов до 4 знаков и точного значения bond length).
+A match within 0.01 Hartree — enough to trust the source of the
+coefficients (the small residual difference is likely from rounding
+the coefficients to 4 digits and the exact bond length used).
 
 ## Ansatz
 
-Используется generic hardware-efficient ansatz на 4 параметра, а не
-"химически мотивированный" UCC single-excitation ansatz, который иногда
-приводят для этого конкретного гамильтониана в литературе:
+Uses a generic hardware-efficient ansatz with 4 parameters, rather than
+the "chemically motivated" UCC single-excitation ansatz sometimes cited
+for this particular Hamiltonian in the literature:
 
 ```
-RY(θ0) на q0        RY(θ1) на q1
+RY(θ0) on q0        RY(θ1) on q1
 CX(control=q1, target=q0)
-RY(θ2) на q0        RY(θ3) на q1
+RY(θ2) on q0        RY(θ3) on q1
 ```
 
-Это осознанный выбор, а не упрощение по незнанию: hardware-efficient
-ansätze — это именно то, что используется на реальном NISQ-железе сегодня,
-потому что "правильные" химические UCC-схемы часто слишком глубокие для
-надёжного исполнения. Плата за простоту — ansatz не несёт химической
-интерпретации (в отличие от UCC), только эмпирическую выразительность.
+This is a deliberate choice, not a simplification born of ignorance:
+hardware-efficient ansätze are exactly what's used on real NISQ hardware
+today, because "proper" chemical UCC circuits are often too deep to run
+reliably. The price of that simplicity: the ansatz carries no chemical
+interpretation (unlike UCC), only empirical expressiveness.
 
-### Проверка выразительности ansatz
+### Verifying the ansatz's expressiveness
 
-Прежде чем использовать этот ansatz, была проведена независимая
-noiseless-оптимизация в numpy/scipy (`COBYLA`, 20 случайных стартовых
-точек): наилучший найденный результат совпал с точным собственным
-значением гамильтониана с точностью до **машинной точности**
-(разница 6.66×10⁻¹⁶) — то есть ansatz действительно способен точно
-достичь истинного основного состояния, а не только приблизиться к нему.
+Before using this ansatz, an independent noiseless optimization was run
+in numpy/scipy (`COBYLA`, 20 random starting points): the best result
+found matched the exact eigenvalue of the Hamiltonian to within
+**machine precision** (a difference of 6.66×10⁻¹⁶) — meaning the ansatz
+really is capable of exactly reaching the true ground state, not just
+approximating it.
 
-Отдельно была найдена (и задокументирована в коде явным комментарием)
-путаница с конвенцией `CX`: первая написанная матрица была помечена как
-"control=q0, target=q1", но при явной проверке оказалась
-`CX(control=q1, target=q0)` — то есть комментарий был неверным, хотя сама
-схема работала правильно. Это именно тот тип бага, который иначе тихо
-попал бы в Qiskit-код с неверной документацией.
+Separately, a mix-up in the `CX` convention was found (and documented in
+the code with an explicit comment): the first matrix written down was
+labeled "control=q0, target=q1", but explicit checking showed it was
+actually `CX(control=q1, target=q0)` — i.e. the comment was wrong, even
+though the circuit itself worked correctly. This is exactly the kind of
+bug that would otherwise silently end up in the Qiskit code with
+incorrect documentation.
 
-## Measurement-based pipeline: от гамильтониана к измерениям
+## Measurement-based pipeline: from Hamiltonian to measurements
 
-В отличие от numpy-проверки (где `⟨ψ|H|ψ⟩` считается точно через матричное
-умножение), реальное железо не даёт доступа к волновой функции — только к
-результатам измерений. Для каждого не-единичного терма гамильтониана
-нужно:
+Unlike the numpy check (where `⟨ψ|H|ψ⟩` is computed exactly via matrix
+multiplication), real hardware gives no access to the wavefunction —
+only to measurement outcomes. For every non-identity term of the
+Hamiltonian:
 
-1. Повернуть базис измерения перед measurement:
+1. Rotate the measurement basis before measuring:
    - **X** → `H`
-   - **Y** → `Sdg`, затем `H`
-   - **Z** → без поворота
-2. Измерить в вычислительном базисе.
-3. Восстановить `⟨P⟩` по формуле: для каждого shot — произведение `(-1)^bit`
-   по кубитам, входящим в терм (остальные кубиты не участвуют в знаке).
+   - **Y** → `Sdg`, then `H`
+   - **Z** → no rotation
+2. Measure in the computational basis.
+3. Recover `⟨P⟩` via: for each shot, the product of `(-1)^bit` over the
+   qubits involved in the term (other qubits don't affect the sign).
 
-### Проверка pipeline целиком
+### Verifying the whole pipeline
 
-Оба шага (базисные повороты + знаковая формула) проверены независимо:
+Both steps (basis rotations + the sign formula) were verified
+independently:
 
-- **Правило поворота для Y** проверено явно: `H · Sdg` переводит `|+i⟩ → |0⟩`
-  и `|−i⟩ → |1⟩` — подтверждено численно, а не взято по памяти.
-- **Полный measurement-based pipeline** (базисные повороты → точные
-  вероятности → знаковая формула) сверен с прямым `⟨ψ|H|ψ⟩` для случайных
-  параметров ansatz — совпадение до 1e-9 (машинная точность).
-- **VQE со статистическим шумом** (8192 shots на терм, как в демо):
-  найденная энергия отличается от точной всего на **0.0015 Hartree** —
-  это меньше порога "химической точности" (~0.0016 Hartree), обычно
-  используемого как ориентир в квантовой химии.
+- **The Y rotation rule** was checked explicitly: `H · Sdg` maps
+  `|+i⟩ → |0⟩` and `|−i⟩ → |1⟩` — confirmed numerically, not taken from
+  memory.
+- **The full measurement-based pipeline** (basis rotations → exact
+  probabilities → sign formula) was checked against direct `⟨ψ|H|ψ⟩`
+  for random ansatz parameters — matched to 1e-9 (machine precision).
+- **VQE with statistical noise** (8192 shots per term, as in the demo):
+  the energy found differs from the exact value by just **0.0015
+  Hartree** — below the "chemical accuracy" threshold (~0.0016 Hartree)
+  commonly used as a benchmark in quantum chemistry.
 
-## ⚠️ Степень проверки перед переносом в Qiskit
+## ⚠️ Degree of verification before porting to Qiskit
 
-Как и во всех предыдущих файлах: сама математика (гамильтониан, ansatz,
-базисные повороты, знаковая формула, полный measurement-based pipeline,
-сходимость оптимизатора) проверена независимо через numpy/scipy — с
-довольно высокой строгостью, потому что здесь больше движущихся частей,
-чем в Grover или QPE. **Не проверено**: конкретные Qiskit-вызовы
-(`qc.ry`, `qc.cx(1,0)`, `qc.sdg`, `qc.measure_all`) и вся интеграция с
-`AerBackend`/`wait_for_result`/`QuantumBackend`. Прогони `demo_vqe.py`
-первым.
+As with all previous files: the math itself (Hamiltonian, ansatz, basis
+rotations, sign formula, full measurement-based pipeline, optimizer
+convergence) was verified independently via numpy/scipy — fairly
+rigorously, since this has more moving parts than Grover or QPE. **Not
+verified**: the specific Qiskit calls (`qc.ry`, `qc.cx(1,0)`, `qc.sdg`,
+`qc.measure_all`) and the full integration with
+`AerBackend`/`wait_for_result`/`QuantumBackend`. Run `demo_vqe.py`
+first.
 
-Отдельно стоит следить за **производительностью**: `demo_vqe.py` делает
-до 5 отправок схем на каждую итерацию оптимизатора (по одной на
-не-единичный терм гамильтониана), и COBYLA может занять десятки
-итераций — то есть суммарно сотни round-trip через `wait_for_result`.
-На `AerBackend` это должно быть быстро (симуляция мгновенная, задержка —
-только от `run_in_executor`), но не удивляйся, если первый запуск займёт
-заметно больше времени, чем предыдущие демо.
+Worth keeping an eye on **performance** separately: `demo_vqe.py` sends
+up to 5 circuits per optimizer iteration (one per non-identity term of
+the Hamiltonian), and COBYLA can take dozens of iterations — so hundreds
+of round trips through `wait_for_result` in total. On `AerBackend` this
+should be fast (simulation is instant, the only latency comes from
+`run_in_executor`), but don't be surprised if the first run takes
+noticeably longer than the previous demos.
 
-## sync/async мост
+## The sync/async bridge
 
-`scipy.optimize.minimize` — синхронный API, а весь `QuantumBackend` —
-асинхронный. Мост реализован через `asyncio.run()` на каждой итерации
-COBYLA (`run_vqe` в `vqe_loop.py`). Это специально проверено на реальном
-(не заглушечном) `MockHardwareBackend`/`wait_for_result` из этого проекта
-перед тем, как использовать паттерн в бою — иначе легко словить
-`RuntimeError: asyncio.run() cannot be called from a running event loop`,
-если `run_vqe` вызвать изнутри уже работающего event loop (например,
-обернув в `asyncio.run(main())`, как это сделано в остальных демо этого
-проекта). Именно поэтому `demo_vqe.py` — единственное демо, где `main()`
-**не** обёрнут в `asyncio.run()`.
+`scipy.optimize.minimize` has a synchronous API, while all of
+`QuantumBackend` is asynchronous. The bridge is implemented via
+`asyncio.run()` on each COBYLA iteration (`run_vqe` in `vqe_loop.py`).
+This was specifically checked against the real (not stubbed)
+`MockHardwareBackend`/`wait_for_result` from this project before using
+the pattern for real — otherwise it's easy to hit
+`RuntimeError: asyncio.run() cannot be called from a running event loop`
+if `run_vqe` gets called from inside an already-running event loop (for
+example, wrapped in `asyncio.run(main())` the way the rest of this
+project's demos are). That's exactly why `demo_vqe.py` is the one demo
+where `main()` is **not** wrapped in `asyncio.run()`.
 
-Это осознанный компромисс для пет-проекта, а не готовое production-решение
-— настоящий оркестратор вместо этого держал бы один постоянный event loop
-и мостил бы через `run_coroutine_threadsafe`.
+This is a deliberate tradeoff for a pet project, not a production-ready
+solution — a real orchestrator would instead hold one persistent event
+loop and bridge via `run_coroutine_threadsafe`.
 
-## Использование в проекте
+## Usage in this project
 
 `quantum_core/algorithms/vqe.py`:
-- `H2_HAMILTONIAN` — список термов гамильтониана;
-- `build_ansatz(params)` — 4-параметрический hardware-efficient ansatz;
-- `build_measurement_circuit(params, term)` — ansatz + поворот базиса +
-  измерение для конкретного терма;
-- `pauli_expectation_from_counts(counts, term)` — восстановление `⟨P⟩` из
-  измерений.
+- `H2_HAMILTONIAN` — the list of Hamiltonian terms;
+- `build_ansatz(params)` — the 4-parameter hardware-efficient ansatz;
+- `build_measurement_circuit(params, term)` — ansatz + basis rotation +
+  measurement for a specific term;
+- `pauli_expectation_from_counts(counts, term)` — recovers `⟨P⟩` from
+  measurement counts.
 
 `quantum_core/loops/vqe_loop.py`:
-- `evaluate_energy(backend, params, shots)` — один полный
-  classical-quantum round trip (все термы гамильтониана);
-- `run_vqe(backend, ...)` — полный feedback loop с COBYLA. **Синхронная**
-  функция — вызывать напрямую, не оборачивая в `asyncio.run()`.
+- `evaluate_energy(backend, params, shots)` — one full classical-quantum
+  round trip (all Hamiltonian terms);
+- `run_vqe(backend, ...)` — the full feedback loop with COBYLA. A
+  **synchronous** function — call it directly, don't wrap it in
+  `asyncio.run()`.

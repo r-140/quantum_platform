@@ -1,137 +1,142 @@
-# Postgres: персистентность экспериментов
+# Postgres: experiment persistence
 
-## Что изменилось
+## What changed
 
-`ExperimentStore` был in-memory (`threading.Lock` + dict), не переживал
-рестарт процесса и не работал бы корректно с несколькими воркерами
-uvicorn. Теперь это абстракция (по аналогии с `QuantumBackend` в
-`quantum_core`) с двумя реализациями:
+`ExperimentStore` used to be in-memory (`threading.Lock` + dict), didn't
+survive a process restart, and wouldn't have worked correctly with
+multiple uvicorn workers. Now it's an abstraction (mirroring
+`QuantumBackend` in `quantum_core`) with two implementations:
 
-- **`InMemoryExperimentStore`** — как раньше, но теперь `asyncio.Lock`
-  вместо `threading.Lock` (обоснование ниже), используется по умолчанию и
-  в тестах;
-- **`PostgresExperimentStore`** — настоящая персистентность через
-  SQLAlchemy 2.0 async + `asyncpg`, включается через переменную
-  окружения `DATABASE_URL`.
+- **`InMemoryExperimentStore`** — as before, but now `asyncio.Lock`
+  instead of `threading.Lock` (rationale below), used by default and in
+  tests;
+- **`PostgresExperimentStore`** — real persistence via SQLAlchemy 2.0
+  async + `asyncpg`, enabled through the `DATABASE_URL` environment
+  variable.
 
-Роутеры и `main.py` зависят только от абстрактного `ExperimentStore`
-(`app/store/base.py`), никогда от конкретной реализации напрямую —
-`app/deps.get_store()` решает, какую вернуть, в зависимости от
+Routers and `main.py` depend only on the abstract `ExperimentStore`
+(`app/store/base.py`), never on a concrete implementation directly —
+`app/deps.get_store()` decides which one to return based on
 `DATABASE_URL`.
 
-## Почему `asyncio.Lock`, а не `threading.Lock`, в in-memory store
+## Why `asyncio.Lock`, not `threading.Lock`, in the in-memory store
 
-Раньше `threading.Lock` был осознанным выбором — VQE-эндпоинт исполнялся
-в потоке threadpool'а (`run_in_threadpool`), поэтому доступ к store был
-по-настоящему многопоточным. После перехода на очередь (RabbitMQ) API
-вообще ничего не исполняет — `run_in_threadpool` для VQE больше не нужен
-(см. `docs/architecture/orchestration.md`). Значит, все обращения к store
-идут из корутин на одном event loop, и `asyncio.Lock` — более идиоматичный
-выбор для чисто async-кода.
+`threading.Lock` used to be the right call — the VQE endpoint ran in a
+threadpool thread (`run_in_threadpool`), so access to the store really
+was multi-threaded. After moving to a queue (RabbitMQ), the API doesn't
+execute anything at all anymore — `run_in_threadpool` for VQE is no
+longer needed (see `docs/architecture/orchestration.md`). That means all
+store access now happens from coroutines on a single event loop, and
+`asyncio.Lock` is the more idiomatic choice for purely async code.
 
-## Схема
+## Schema
 
-Одна таблица `experiments` (`migrations/versions/0001_create_experiments_table.py`):
+A single `experiments` table
+(`migrations/versions/0001_create_experiments_table.py`):
 
-| колонка | тип | примечание |
+| column | type | note |
 |---|---|---|
-| `id` | `String` | PK; строка `uuid.uuid4()`, не нативный Postgres `UUID` — см. обоснование в `models.py` |
+| `id` | `String` | PK; a `uuid.uuid4()` string, not a native Postgres `UUID` — see rationale in `models.py` |
 | `algorithm` | `String` | |
 | `status` | `String` | `queued`/`completed`/`failed` |
-| `submitted_at` | `TIMESTAMPTZ` | индексирован — под `list_all()`/будущие "recent experiments" запросы |
+| `submitted_at` | `TIMESTAMPTZ` | indexed — for `list_all()`/future "recent experiments" queries |
 | `completed_at` | `TIMESTAMPTZ`, nullable | |
-| `result` | `JSONB`, nullable | нативная поддержка индексации/запросов в Postgres, хотя пока ничего не запрашивает *внутрь* JSON |
+| `result` | `JSONB`, nullable | native Postgres indexing/query support, though nothing queries *into* the JSON yet |
 | `error` | `Text`, nullable | |
 
-`save()` — не "проверить, есть ли запись, потом insert/update", а один
-`INSERT ... ON CONFLICT (id) DO UPDATE` (SQLAlchemy:
-`postgresql.insert(...).on_conflict_do_update(...)`) — без гонки между
-проверкой существования и записью.
+`save()` isn't "check if a row exists, then insert/update" — it's a
+single `INSERT ... ON CONFLICT (id) DO UPDATE` (SQLAlchemy:
+`postgresql.insert(...).on_conflict_do_update(...)`) — no race between
+checking existence and writing.
 
-## Как это проверялось
+## How this was verified
 
-Как и с самой первой Grover-математикой в этом проекте: перед тем как
-писать Postgres-специфичный код, отдельно проверил **логику** SQL (не
-сам Postgres) через `sqlite3` (stdlib, доступен без сети) — INSERT,
-`ON CONFLICT DO UPDATE`, SELECT по id, ORDER BY. Все 5 сценариев прошли,
-включая то, что `submitted_at` не перезаписывается при апдейте через
-upsert.
+As with the very first Grover math in this project: before writing
+Postgres-specific code, I separately verified the **logic** of the SQL
+(not Postgres itself) using `sqlite3` (stdlib, available without
+network) — INSERT, `ON CONFLICT DO UPDATE`, SELECT by id, ORDER BY. All
+5 scenarios passed, including that `submitted_at` isn't overwritten on
+an update via upsert.
 
-⚠️ Честная оговорка: sqlite ≠ Postgres. Не покрыто этой проверкой:
-- `JSONB` vs `TEXT` (в sqlite JSON хранился через ручной `json.dumps`;
-  в Postgres `JSONB`-колонка сериализует/десериализует `dict` нативно,
-  без ручного вызова `json.dumps` в коде — SQLAlchemy делает это
-  прозрачно через диалект);
-- `UUID`/`TIMESTAMPTZ` типы;
-- поведение асинхронного драйвера (`asyncpg`) — на sqlite это в принципе
-  не проверяется.
+⚠️ Honest caveat: sqlite ≠ Postgres. Not covered by this check:
+- `JSONB` vs. `TEXT` (in sqlite, JSON was stored via manual
+  `json.dumps`; in Postgres a `JSONB` column serializes/deserializes a
+  `dict` natively, with no manual `json.dumps` call in the code —
+  SQLAlchemy does this transparently through the dialect);
+- `UUID`/`TIMESTAMPTZ` types;
+- async driver (`asyncpg`) behavior — not testable on sqlite in
+  principle.
 
-**Подтверждение этой оговорки на практике**: первый же реальный запуск
-против настоящего Postgres упал с
-`TypeError: can't subtract offset-naive and offset-aware datetimes`.
-Причина — рассинхрон между миграцией (`sa.DateTime(timezone=True)`,
-создаёт `TIMESTAMPTZ`) и ORM-моделью (`Mapped[datetime]` без явного
-`DateTime(timezone=True)`, что SQLAlchemy по умолчанию сопоставляет с
-**naive** `DateTime`). В сгенерированном SQL это было видно напрямую:
-`$4::TIMESTAMP WITHOUT TIME ZONE` — каст по типу из модели, а не по
-реальной схеме БД в таблице. `datetime.now(timezone.utc)` (offset-aware)
-не лез в этот каст. Именно такой класс ошибки sqlite не мог поймать в
-принципе — там нет различия aware/naive timestamp вообще. Исправлено
-добавлением явного `DateTime(timezone=True)` в `models.py` для обеих
-колонок (`submitted_at`, `completed_at`); сама таблица в БД была создана
-верно ещё до этого — миграцию перекатывать не потребовалось, только
-перезапустить `api` с исправленной моделью.
+**This caveat was confirmed in practice**: the very first real run
+against actual Postgres crashed with
+`TypeError: can't subtract offset-naive and offset-aware datetimes`. The
+cause was a mismatch between the migration (`sa.DateTime(timezone=True)`,
+which creates a `TIMESTAMPTZ`) and the ORM model (`Mapped[datetime]`
+without an explicit `DateTime(timezone=True)`, which SQLAlchemy maps to
+a **naive** `DateTime` by default). This was visible directly in the
+generated SQL: `$4::TIMESTAMP WITHOUT TIME ZONE` — a cast based on the
+model's type, not the DB table's actual schema. `datetime.now(timezone.utc)`
+(offset-aware) didn't fit into that cast. This is exactly the class of
+bug sqlite could never have caught — it has no aware/naive timestamp
+distinction at all. Fixed by adding an explicit `DateTime(timezone=True)`
+to `models.py` for both columns (`submitted_at`, `completed_at`); the
+actual DB table had already been created correctly before this — no
+need to re-roll the migration, just restart `api` with the fixed model.
 
-Отдельно проверил актуальный API SQLAlchemy 2.0 async (`create_async_engine`,
-`async_sessionmaker`, `AsyncSession`) и upsert-синтаксис
+Separately checked the current SQLAlchemy 2.0 async API
+(`create_async_engine`, `async_sessionmaker`, `AsyncSession`) and the
+upsert syntax
 (`sqlalchemy.dialects.postgresql.insert(...).on_conflict_do_update(...)`)
-через веб-поиск документации — не полагался на память, учитывая, как
-часто API меняется между мажорными версиями.
+via web search against the docs — didn't rely on memory, given how often
+this API changes between major versions.
 
-**Логику самого `InMemoryExperimentStore` и `apply_result_message`**
-(включая upsert-паттерн, сохранение `submitted_at` при апдейте,
-конкурентный доступ через `asyncio.gather`) — прогнал напрямую в
-песочнице, подменив Pydantic-зависимые импорты (`ExperimentResponse`)
-"утиными" заглушками с нужной семантикой (`model_copy`), поскольку
-самого `pydantic` в моей среде нет. Это не полная замена реального
-прогона, но ловит логические ошибки (например, в самой формуле upsert
-или в порядке аргументов) до того, как код увидит настоящий Postgres.
+**The logic of `InMemoryExperimentStore` and `apply_result_message`**
+itself (including the upsert pattern, preserving `submitted_at` on
+update, concurrent access via `asyncio.gather`) was run directly in a
+sandbox, with Pydantic-dependent imports (`ExperimentResponse`) swapped
+for duck-typed stubs with the right semantics (`model_copy`), since
+`pydantic` itself isn't available in my environment. This isn't a full
+substitute for a real run, but it catches logic errors (e.g. in the
+upsert formula itself, or argument ordering) before the code ever sees
+a real Postgres.
 
-⚠️ **Не проверено вообще**: сам `asyncpg`/`SQLAlchemy` код против
-реального Postgres, Alembic-миграция (`alembic upgrade head`), весь
-async-мост в `migrations/env.py`. У меня нет ни `sqlalchemy`, ни
-`asyncpg`, ни `alembic`, ни Docker, ни сети.
+⚠️ **Not verified at all**: the `asyncpg`/SQLAlchemy code itself against
+real Postgres, the Alembic migration (`alembic upgrade head`), the whole
+async bridge in `migrations/env.py`. I have neither `sqlalchemy`,
+`asyncpg`, `alembic`, Docker, nor network access.
 
-## Alembic: async-мост
+## Alembic: the async bridge
 
-Alembic по умолчанию генерирует `env.py`, рассчитанный на синхронный
-движок — `engine_from_config()` не работает с `asyncpg`. Использован
-задокументированный паттерн SQLAlchemy: сама миграция (`context.run_migrations()`)
-остаётся синхронным кодом, но вызывается через `AsyncConnection.run_sync(...)`
-изнутри async-контекста движка (`migrations/env.py`).
+Alembic generates an `env.py` by default that's built for a synchronous
+engine — `engine_from_config()` doesn't work with `asyncpg`. Used the
+documented SQLAlchemy pattern: the migration itself
+(`context.run_migrations()`) stays synchronous code, but is invoked via
+`AsyncConnection.run_sync(...)` from inside the engine's async context
+(`migrations/env.py`).
 
-`DATABASE_URL` читается из переменной окружения, а не из `alembic.ini` —
-чтобы не коммитить connection string и не редактировать `.ini` при смене
-окружения.
+`DATABASE_URL` is read from an environment variable, not from
+`alembic.ini` — so the connection string doesn't get committed and the
+`.ini` doesn't need editing when the environment changes.
 
-⚠️ **Второй раз в этом проекте**: `migrations/env.py` делает
-`from app.store.models import Base` — абсолютный импорт, которому нужен
-`services/api/` (родитель `app/`) на `sys.path`. Консольный скрипт
-`alembic upgrade head` этого не даёт (та же причина, по которой
-`python3 app/worker.py` в `orchestrator` падал с `ModuleNotFoundError: No
-module named 'app'` — см. `docs/architecture/orchestration.md`). Фикс тот
-же: запускать через `python3 -m alembic upgrade head`, а не голый
-`alembic upgrade head` — `-m` добавляет текущую директорию в `sys.path`
-первым элементом (подтверждено официальной документацией Python и
-воспроизведено на минимальном примере перед тем, как чинить `dev.sh`).
-Уже встроено в `./dev.sh`.
+⚠️ **Second time in this project**: `migrations/env.py` does
+`from app.store.models import Base` — an absolute import that needs
+`services/api/` (the parent of `app/`) on `sys.path`. The console script
+`alembic upgrade head` doesn't provide that (the same reason
+`python3 app/worker.py` in `orchestrator` used to fail with
+`ModuleNotFoundError: No module named 'app'` — see
+`docs/architecture/orchestration.md`). Same fix: run via
+`python3 -m alembic upgrade head` instead of a bare
+`alembic upgrade head` — `-m` puts the current directory at the front of
+`sys.path` (confirmed against the official Python docs and reproduced on
+a minimal example before fixing `dev.sh`). Already wired into `./dev.sh`.
 
-## Как запустить
+## How to run it
 
-Уже встроено в `./dev.sh` (поднимает Postgres, ждёт healthcheck, гоняет
-`alembic upgrade head`, запускает `api` с `DATABASE_URL` в окружении).
+Already wired into `./dev.sh` (brings up Postgres, waits for the
+healthcheck, runs `alembic upgrade head`, starts `api` with
+`DATABASE_URL` set in the environment).
 
-Вручную:
+Manually:
 
 ```bash
 docker compose up -d postgres
@@ -145,16 +150,17 @@ python3 -m alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
 
-Без `DATABASE_URL` в окружении API по-прежнему стартует и работает —
-просто на in-memory store (лог при старте предупредит об этом явно, не
-молча).
+Without `DATABASE_URL` set, the API still starts and works fine — just
+on the in-memory store (a startup log warns about this explicitly, not
+silently).
 
-## Пока не реализовано
+## Not yet implemented
 
-- Connection pooling под нагрузкой не тюнился (дефолтные настройки
-  `create_async_engine`) — нет ни одного бенчмарка, который бы это
-  оправдывал на данном этапе;
-- `orchestrator` пока ничего не знает про Postgres — сам он не хранит
-  состояние, только читает/публикует в RabbitMQ; если позже понадобится
-  хранить историю calibration-результатов (а не только последний снимок
-  в очереди), это тоже вероятный кандидат на отдельную таблицу.
+- Connection pooling hasn't been tuned under load (default
+  `create_async_engine` settings) — there's no benchmark yet that would
+  justify doing so at this stage;
+- `orchestrator` doesn't know anything about Postgres yet — it doesn't
+  store state itself, it only reads/publishes to RabbitMQ; if we later
+  need to store a history of calibration results (rather than just the
+  latest snapshot in the queue), that's also a likely candidate for its
+  own table.

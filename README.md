@@ -1,110 +1,113 @@
 # quantum-platform
 
-Пет-проект: платформа для запуска квантовых алгоритмов (Grover, SAT-Grover,
-QFT/QPE, VQE) с полноценной production-style архитектурой вокруг них —
-API, очередь задач, оркестрация, персистентность, потоковая телеметрия,
-дашборды. Изначальная цель — погружение в architecture/platform design для
-quantum computing инфраструктуры, а не просто "запустить пару алгоритмов".
+A pet project: a platform for running quantum algorithms (Grover, SAT-Grover,
+QFT/QPE, VQE) wrapped in a full production-style architecture — API, task
+queue, orchestration, persistence, streaming telemetry, dashboards. The
+original goal was to get hands-on with architecture/platform design for
+quantum computing infrastructure, not just "run a couple of algorithms."
 
-## Быстрый старт
+## Quick start
 
-Требуется Docker, Python 3.11+.
+Requires Docker, Python 3.11+.
 
 ```bash
-./dev.sh                    # поднимает всё: инфра + api + orchestrator + stream-analytics
-./dev.sh --profile=verify   # то же самое, но сначала прогоняет тесты каждого сервиса
-./dev.sh --help             # справка по флагам
+./dev.sh                    # brings up everything: infra + api + orchestrator + stream-analytics
+./dev.sh --profile=verify   # same, but runs each service's tests first
+./dev.sh --help             # flag reference
 ```
 
-Первый запуск создаст `.venv` в каждом сервисе и поставит зависимости
-автоматически. Логи — в `.dev-logs/` (gitignored), выводятся в терминал
-через `tail -f`. `Ctrl+C` останавливает `api`/`orchestrator`/
-`stream-analytics`; Docker-контейнеры остаются жить — `docker compose down`
-отдельно, если нужно всё погасить.
+The first run will create a `.venv` in each service and install
+dependencies automatically. Logs go to `.dev-logs/` (gitignored) and are
+streamed to the terminal via `tail -f`. `Ctrl+C` stops `api`/`orchestrator`/
+`stream-analytics`; the Docker containers keep running — use
+`docker compose down` separately if you want to tear everything down.
 
-## Эндпоинты
+## Endpoints
 
-| Сервис | URL | Назначение |
+| Service | URL | Purpose |
 |---|---|---|
-| API — Swagger | http://localhost:8000/docs | интерактивная документация REST API |
-| **Дашборд экспериментов** | http://localhost:8000/dashboard/ | live-таблица, фильтры, drill-down в результат |
-| RabbitMQ | http://localhost:15672 (guest/guest) | management UI очереди задач |
-| **Grafana** | http://localhost:3000 (admin/admin) | метрики (Prometheus) + прямые SQL-запросы к БД |
-| Prometheus | http://localhost:9090 | сырые метрики/таргеты |
-| **Kafka UI (Kafbat)** | http://localhost:8090 | просмотр топиков/сообщений/consumer groups |
-| **Adminer** | http://localhost:8091 | ad-hoc SQL-браузер |
-| Postgres | `localhost:5432` (quantum/quantum, db=`quantum_platform`) | метаданные экспериментов |
-| TimescaleDB | `localhost:5433` (quantum/quantum, db=`telemetry`) | история калибровки |
-| Kafka | `localhost:9092` | брокер |
+| API — Swagger | http://localhost:8000/docs | interactive REST API docs |
+| **Experiments dashboard** | http://localhost:8000/dashboard/ | live table, filters, drill-down into results |
+| RabbitMQ | http://localhost:15672 (guest/guest) | task queue management UI |
+| **Grafana** | http://localhost:3000 (admin/admin) | metrics (Prometheus) + direct SQL queries against the DBs |
+| Prometheus | http://localhost:9090 | raw metrics/targets |
+| **Kafka UI (Kafbat)** | http://localhost:8090 | browse topics/messages/consumer groups |
+| **Adminer** | http://localhost:8091 | ad-hoc SQL browser |
+| Postgres | `localhost:5432` (quantum/quantum, db=`quantum_platform`) | experiment metadata |
+| TimescaleDB | `localhost:5433` (quantum/quantum, db=`telemetry`) | calibration history |
+| Kafka | `localhost:9092` | broker |
 
-## Структура
+## Structure
 
 ```
 quantum-platform/
-├── dev.sh                     # запуск всего стека, профили quick/verify
-├── docker-compose.yml         # RabbitMQ, Postgres, Kafka, TimescaleDB + debug/ops-стек
-├── infra/                     # конфиги Prometheus/Grafana/RabbitMQ-плагинов
+├── dev.sh                     # spins up the whole stack, quick/verify profiles
+├── docker-compose.yml         # RabbitMQ, Postgres, Kafka, TimescaleDB + debug/ops stack
+├── infra/                     # Prometheus/Grafana/RabbitMQ-plugin configs
 ├── scripts/
-│   └── observe.py             # генератор нагрузки + live-наблюдение за стеком
+│   └── observe.py             # load generator + live observation of the stack
 ├── services/
-│   ├── quantum-core/          # библиотека: алгоритмы, hw/sw абстракция, execution
-│   ├── api/                   # FastAPI: приём запросов, дашборд, Postgres-стор
-│   ├── orchestrator/          # RabbitMQ-воркер: исполнение + retry + calibration
-│   └── stream-analytics/      # Kafka consumer'ы (hand-rolled + Faust) + TimescaleDB sink
+│   ├── quantum-core/          # library: algorithms, hw/sw abstraction, execution
+│   ├── api/                   # FastAPI: request intake, dashboard, Postgres store
+│   ├── orchestrator/          # RabbitMQ worker: execution + retry + calibration
+│   └── stream-analytics/      # Kafka consumers (hand-rolled + Faust) + TimescaleDB sink
 └── docs/
-    ├── algorithms/            # физика/математика алгоритмов, независимая проверка
-    └── architecture/          # архитектурные решения, ADR-style
+    ├── algorithms/            # algorithm physics/math, independent verification
+    └── architecture/          # architecture decisions, ADR-style
 ```
 
-Каждый сервис — свой `README.md` с деталями реализации, степенью
-проверки и инструкциями запуска по отдельности.
+Every service has its own `README.md` with implementation details, degree
+of verification, and instructions for running it standalone.
 
-## Документация
+## Documentation
 
-### Алгоритмы (`docs/algorithms/`)
-- [`grover.md`](docs/algorithms/grover.md) — Grover: hello-world версия,
-  настоящий SAT-поиск через `PhaseOracleGate`, ограничения (QRAM,
-  BBHT-адаптивный поиск), отличие от Шора
-- [`qft_qpe.md`](docs/algorithms/qft_qpe.md) — QFT/QPE, независимая
-  проверка через numpy (нашла и исправила реальный баг в конвенции QFT до
-  переноса в Qiskit)
-- [`vqe.md`](docs/algorithms/vqe.md) — VQE на молекуле H₂, hardware-efficient
-  ansatz, полная проверка measurement-based pipeline
+### Algorithms (`docs/algorithms/`)
+- [`grover.md`](docs/algorithms/grover.md) — Grover: hello-world version,
+  real SAT search via `PhaseOracleGate`, limitations (QRAM,
+  BBHT adaptive search), how it differs from Shor's algorithm
+- [`qft_qpe.md`](docs/algorithms/qft_qpe.md) — QFT/QPE, independent
+  verification against numpy (found and fixed a real bug in the QFT
+  convention before it ever reached Qiskit)
+- [`vqe.md`](docs/algorithms/vqe.md) — VQE on the H₂ molecule,
+  hardware-efficient ansatz, full verification of the measurement-based
+  pipeline
 
-### Архитектура (`docs/architecture/`)
-- [`orchestration.md`](docs/architecture/orchestration.md) — переход с
-  синхронного исполнения на RabbitMQ, retry/dead-letter policy
-- [`postgres.md`](docs/architecture/postgres.md) — персистентность
-  экспериментов, storage-абстракция, Alembic
-- [`kafka.md`](docs/architecture/kafka.md) — телеметрия калибровки,
-  hand-rolled consumer vs Faust, TimescaleDB sink
-- [`dashboard.md`](docs/architecture/dashboard.md) — дашборд экспериментов,
-  почему не Grafana для этой части
-- [`observability.md`](docs/architecture/observability.md) — debug/ops-стек:
-  Grafana, Prometheus, Kafka UI, Adminer
-- [`deferred-work.md`](docs/architecture/deferred-work.md) — отложенные
-  куски из исходного наброска (fast-control, продвинутые Faust-топологии)
+### Architecture (`docs/architecture/`)
+- [`orchestration.md`](docs/architecture/orchestration.md) — moving from
+  synchronous execution to RabbitMQ, retry/dead-letter policy
+- [`postgres.md`](docs/architecture/postgres.md) — experiment persistence,
+  storage abstraction, Alembic
+- [`kafka.md`](docs/architecture/kafka.md) — calibration telemetry,
+  hand-rolled consumer vs. Faust, TimescaleDB sink
+- [`dashboard.md`](docs/architecture/dashboard.md) — the experiments
+  dashboard, and why it isn't Grafana for this part
+- [`observability.md`](docs/architecture/observability.md) — debug/ops
+  stack: Grafana, Prometheus, Kafka UI, Adminer
+- [`deferred-work.md`](docs/architecture/deferred-work.md) — deferred
+  pieces from the original sketch (fast-control, advanced Faust
+  topologies)
 
-### Прочее
-- [`testing.md`](docs/testing.md) — подход к тестированию, включая то,
-  как тесты проверялись без доступа к pytest в рабочей среде
+### Other
+- [`testing.md`](docs/testing.md) — the testing approach, including how
+  tests were verified without access to pytest in the working
+  environment
 
-## Тесты
+## Tests
 
 ```bash
-./dev.sh --profile=verify        # все сервисы разом, до старта стека
-# или по отдельности:
+./dev.sh --profile=verify        # all services at once, before the stack starts
+# or individually:
 cd services/quantum-core && pytest tests/ -v
 cd services/api && pytest tests/ -v
 cd services/stream-analytics && pytest tests/ -v
 ```
 
-## Архитектура вкратце
+## Architecture at a glance
 
 ```
                      ┌─────────────┐
-  POST /experiments  │     api     │  GET /experiments (фильтры/сортировка/stats)
-  ──────────────────▶│  (FastAPI)  │◀────────────────── дашборд (static/dashboard/)
+  POST /experiments  │     api     │  GET /experiments (filters/sorting/stats)
+  ──────────────────▶│  (FastAPI)  │◀────────────────── dashboard (static/dashboard/)
                       └──────┬──────┘
                              │ publish task           ▲ apply result
                              ▼                         │
@@ -136,15 +139,16 @@ cd services/stream-analytics && pytest tests/ -v
 Postgres (experiments metadata) ──▶ api (store) + Grafana + Adminer
 ```
 
-## Честная оговорка про степень проверки
+## An honest note on the degree of verification
 
-Этот проект собирался в паре с Claude, преимущественно в среде без
-доступа к Docker/сети — многое (Qiskit-математика, чистая Python-логика)
-проверялось независимо перед тем, как код попадал в репозиторий; многое
-другое (RabbitMQ, Kafka, Postgres, Grafana) — нет, и было проверено уже
-здесь, вручную, с несколькими найденными и исправленными по пути
-реальными багами (несовпадение timezone в SQLAlchemy-модели, неверный
-способ включения RabbitMQ-плагина, устаревший образ Kafka UI и другие —
-подробности в соответствующих `docs/architecture/*.md`). Это осознанный
-и честно задокументированный процесс, а не показатель низкого качества —
-смотри пометки "⚠️ Степень проверки" в каждом архитектурном документе.
+This project was built in collaboration with Claude, mostly in an
+environment without access to Docker/network — a lot of it (the Qiskit
+math, pure Python logic) was independently verified before the code ever
+landed in the repo; a lot of the rest (RabbitMQ, Kafka, Postgres, Grafana)
+was not, and has since been verified here by hand, turning up and fixing
+several real bugs along the way (a timezone mismatch in a SQLAlchemy
+model, the wrong way to enable a RabbitMQ plugin, a stale Kafka UI image,
+and others — details in the corresponding `docs/architecture/*.md` files).
+This is a deliberate and honestly documented process, not a sign of low
+quality — see the "⚠️ Degree of verification" notes in each architecture
+document.

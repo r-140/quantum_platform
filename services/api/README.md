@@ -1,95 +1,100 @@
 # api
 
-Тонкий FastAPI-слой, принимающий запросы на квантовые эксперименты
+A thin FastAPI layer that accepts requests for quantum experiments
 (Grover, SAT-Grover, QPE, VQE).
 
-**С появлением RabbitMQ/orchestrator (см. `docs/architecture/orchestration.md`)
-API больше не исполняет эксперименты сам.** `POST /experiments`
-публикует задачу в очередь и сразу возвращает `202 Accepted` со статусом
-`queued`. Исполняет эксперимент отдельный сервис `orchestrator`; когда
-результат готов, API узнаёт об этом через очередь `experiment-results` и
-обновляет свой store. `GET /experiments/{id}` показывает актуальный
-статус.
+**With RabbitMQ/orchestrator now in the picture (see
+`docs/architecture/orchestration.md`), the API no longer executes
+experiments itself.** `POST /experiments` publishes a task to the queue
+and immediately returns `202 Accepted` with status `queued`. A separate
+`orchestrator` service executes the experiment; once the result is
+ready, the API finds out via the `experiment-results` queue and updates
+its store. `GET /experiments/{id}` shows the current status.
 
-## Структура
+## Structure
 
 ```
 api/
 ├── requirements.txt
 └── app/
-    ├── main.py                  # точка входа, lifespan (RabbitMQ), consumer результатов
-    ├── deps.py                  # store экспериментов + RabbitMQ publish_task
+    ├── main.py                  # entry point, lifespan (RabbitMQ), results consumer
+    ├── deps.py                  # experiment store + RabbitMQ publish_task
     ├── schemas/
-    │   └── experiments.py       # Pydantic-модели: discriminated union по алгоритму
+    │   └── experiments.py       # Pydantic models: discriminated union by algorithm
     └── routers/
-        ├── experiments.py       # POST (публикует задачу) / GET /experiments
-        └── backends.py          # GET /backends (информационный)
+        ├── experiments.py       # POST (publishes a task) / GET /experiments
+        └── backends.py          # GET /backends (informational)
 ```
 
-Обрати внимание: `app/execution.py` **удалён** — бизнес-логика запуска
-алгоритмов переехала в `quantum_core/execution.py`, общий для `api` и
-`orchestrator` модуль (простые Python-типы, без Pydantic). API теперь
-вообще не импортирует `quantum_core.algorithms.*` напрямую.
+Note: `app/execution.py` has been **removed** — the business logic for
+running algorithms moved into `quantum_core/execution.py`, a module
+shared between `api` and `orchestrator` (plain Python types, no
+Pydantic). The API no longer imports `quantum_core.algorithms.*`
+directly at all.
 
 ### `app/schemas/experiments.py`
-`ExperimentRequest` — discriminated union из 4 моделей
-(`GroverRequest`/`SatGroverRequest`/`QPERequest`/`VQERequest`), различаемых
-по полю `algorithm`.
+`ExperimentRequest` — a discriminated union of 4 models
+(`GroverRequest`/`SatGroverRequest`/`QPERequest`/`VQERequest`),
+distinguished by the `algorithm` field.
 
-⚠️ Дискриминатор — строковый литерал (`Literal["grover"]`), не член enum
-(`Literal[Algorithm.GROVER]`) — у последнего есть задокументированный баг
-генерации OpenAPI-схемы в Pydantic.
+⚠️ The discriminator is a string literal (`Literal["grover"]`), not an
+enum member (`Literal[Algorithm.GROVER]`) — the latter has a documented
+OpenAPI-schema-generation bug in Pydantic.
 
-`ExperimentStatus` теперь включает `queued` (не только `completed`/`failed`)
-— отражает то, что исполнение асинхронное.
+`ExperimentStatus` now includes `queued` (not just
+`completed`/`failed`) — reflecting the fact that execution is now
+asynchronous.
 
 ### `app/deps.py`
-- `ExperimentStore` — in-memory, потокобезопасный (`threading.Lock`).
-  ⚠️ Временное упрощение: не переживает рестарт процесса, не работает
-  корректно с несколькими воркерами uvicorn — это должен закрыть Postgres,
-  когда дойдём до storage-слоя;
-- `get_backend()` — оставлен (ленивый импорт `AerBackend`, не тянет Qiskit
-  на уровне модуля), но сейчас не используется роутером — просто доступен
-  на будущее (debug/sync-режим, тесты);
+- `ExperimentStore` — in-memory, thread-safe (`threading.Lock`).
+  ⚠️ Temporary simplification: doesn't survive a process restart,
+  doesn't work correctly with multiple uvicorn workers — this is meant
+  to be closed by Postgres once we get to the storage layer;
+- `get_backend()` — kept around (lazy `AerBackend` import, doesn't pull
+  in Qiskit at module load time), but currently unused by the router —
+  just available for the future (debug/sync mode, tests);
 - `init_rabbitmq()`/`close_rabbitmq()`/`publish_task()`/`get_rabbitmq_channel()`
-  — RabbitMQ-соединение как process-lifetime singleton, инициализируется
-  через `lifespan` в `main.py`.
+  — the RabbitMQ connection as a process-lifetime singleton, initialized
+  via `lifespan` in `main.py`.
 
 ### `app/main.py`
-`lifespan` подключается к RabbitMQ на старте, запускает фоновую задачу
-`consume_results()` (слушает `experiment-results`, обновляет store через
-`apply_result_message()`), корректно всё закрывает на shutdown.
+`lifespan` connects to RabbitMQ on startup, starts the
+`consume_results()` background task (listens to `experiment-results`,
+updates the store via `apply_result_message()`), and cleanly shuts
+everything down on exit.
 
 ### `app/routers/experiments.py`
-`POST /experiments` сохраняет запись со статусом `queued` **до**
-публикации в очередь (чтобы consumer результатов не потерял быстрый
-ответ, если тот придёт раньше, чем функция допишет запись) — потом
-публикует `ExperimentTask`. Ошибка публикации (например, RabbitMQ
-недоступен) — тоже не 500, а `FAILED`-запись с понятной причиной.
+`POST /experiments` saves the record with status `queued` **before**
+publishing to the queue (so the results consumer doesn't miss a fast
+response if it arrives before the record-writing function finishes) —
+then publishes an `ExperimentTask`. A publish failure (e.g. RabbitMQ
+unreachable) also doesn't produce a 500 — instead a `FAILED` record with
+a clear reason.
 
-## Юнит-тесты
+## Unit tests
 
 ```
 tests/
-├── conftest.py                # fixture client (TestClient) + fresh_store
-├── test_store.py               # ExperimentStore напрямую
-├── test_experiments_router.py  # dispatch (publish_task замокан), enqueue-ошибки, GET
-├── test_results_consumer.py    # apply_result_message() -- обновление store по результату
-└── test_validation.py          # граничные случаи Pydantic-схем
+├── conftest.py                # client fixture (TestClient) + fresh_store
+├── test_store.py               # ExperimentStore directly
+├── test_experiments_router.py  # dispatch (publish_task mocked), enqueue errors, GET
+├── test_results_consumer.py    # apply_result_message() -- updating the store from a result
+└── test_validation.py          # edge cases of the Pydantic schemas
 ```
 
-⚠️ **Важный нюанс**: `TestClient(app)` в `conftest.py` используется **без**
-`with`-блока — это осознанно: без `with` Starlette **не запускает
-`lifespan`**, а значит тесты не пытаются установить настоящее соединение с
-RabbitMQ. Все тесты, которые касаются публикации задачи, подменяют
-`app.deps.publish_task` напрямую — реальный RabbitMQ для юнит-тестов не
-нужен вообще. Если когда-нибудь понадобится тест, использующий
-lifespan-состояние — переключение на `with TestClient(app) as client:`
-приведёт к попытке реального подключения, это стоит иметь в виду.
+⚠️ **Important nuance**: `TestClient(app)` in `conftest.py` is used
+**without** a `with` block — deliberately: without `with`, Starlette
+**doesn't run `lifespan`**, meaning the tests never try to establish a
+real RabbitMQ connection. All tests touching task publishing stub out
+`app.deps.publish_task` directly — real RabbitMQ isn't needed for unit
+tests at all. If a test ever needs lifespan state, switching to
+`with TestClient(app) as client:` will trigger a real connection
+attempt — worth keeping in mind.
 
-Ещё один результат рефакторинга: раз `execution.py` удалён и роутер не
-трогает `quantum_core.algorithms.*` — **весь тестовый набор API теперь не
-требует установленного Qiskit** (только `fastapi`/`pydantic`/`httpx`).
+Another result of the refactor: since `execution.py` is gone and the
+router doesn't touch `quantum_core.algorithms.*` — **the entire API test
+suite no longer requires Qiskit to be installed** (only
+`fastapi`/`pydantic`/`httpx`).
 
 ```bash
 cd services/api
@@ -97,14 +102,15 @@ source .venv/bin/activate
 pytest tests/ -v
 ```
 
-## ⚠️ Степень проверки
+## ⚠️ Degree of verification
 
-Синхронная версия этого сервиса (до перехода на очередь) была
-**подтверждена рабочей** — прогнана вручную через `curl` для всех четырёх
-алгоритмов. Всё, что появилось при переходе на RabbitMQ (lifespan,
-publish_task, consume_results, новые тесты) — **не запускалось**: у меня
-нет ни `aio-pika`, ни Docker, ни сети. Прогони `pytest tests/ -v`, а затем
-end-to-end сценарий целиком (см. `docs/architecture/orchestration.md`,
-раздел "Как запустить целиком" — там нужен ещё и `orchestrator`).
+The synchronous version of this service (before moving to the queue) was
+**confirmed working** — run by hand via `curl` for all four algorithms.
+Everything added during the RabbitMQ migration (lifespan, publish_task,
+consume_results, the new tests) **hasn't been run**: I have neither
+`aio-pika`, Docker, nor network access. Run `pytest tests/ -v`, then the
+full end-to-end scenario (see `docs/architecture/orchestration.md`,
+"Running the whole thing" section — you'll also need `orchestrator` for
+that).
 
-Интерактивная документация — `http://localhost:8000/docs`.
+Interactive docs: `http://localhost:8000/docs`.

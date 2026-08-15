@@ -1,171 +1,174 @@
-# Оркестрация: API → RabbitMQ → orchestrator
+# Orchestration: API → RabbitMQ → orchestrator
 
-## Что изменилось
+## What changed
 
-До этого шага `POST /experiments` выполнял эксперимент **синхронно
-внутри процесса API** — клиент ждал ответа всё время исполнения (для
-VQE — ~55 секунд). Теперь:
+Before this step, `POST /experiments` ran the experiment **synchronously
+inside the API process** — the client waited for the entire execution
+(~55 seconds for VQE). Now:
 
-1. `POST /experiments` публикует задачу в очередь `experiments` и
-   немедленно возвращает `202 Accepted` со статусом `queued`.
-2. `orchestrator` (отдельный процесс/сервис) читает очередь, исполняет
-   эксперимент через `quantum_core`, публикует результат в очередь
-   `experiment-results`.
-3. API в фоне слушает `experiment-results` и обновляет свой in-memory
-   store. `GET /experiments/{id}` отдаёт актуальный статус — `queued`,
-   пока не пришёл результат, затем `completed`/`failed`.
+1. `POST /experiments` publishes a task to the `experiments` queue and
+   immediately returns `202 Accepted` with status `queued`.
+2. `orchestrator` (a separate process/service) reads the queue, executes
+   the experiment via `quantum_core`, and publishes the result to the
+   `experiment-results` queue.
+3. The API listens to `experiment-results` in the background and updates
+   its in-memory store. `GET /experiments/{id}` returns the current
+   status — `queued` until the result arrives, then
+   `completed`/`failed`.
 
-## Почему RabbitMQ, а не Kafka — для этой конкретной части
+## Why RabbitMQ, not Kafka — for this particular part
 
-Напомним ADR с самого начала проекта: для *задач* (task queue —
-"выполни этот эксперимент один раз") RabbitMQ подходит лучше — есть
-нормальный per-message ack/retry из коробки, и семантика "одна задача —
-одна обработка" ему соответствует естественно. Kafka остаётся
-кандидатом для *телеметрии* (calibration metrics, real-time аналитика) —
-это отдельный, ещё не реализованный поток, см. `docs/decisions/`.
+Recapping the ADR from the very start of the project: for *tasks* (a
+task queue — "run this experiment once") RabbitMQ is the better fit —
+it has proper per-message ack/retry out of the box, and the "one task,
+one processing" semantics match it naturally. Kafka remains the
+candidate for *telemetry* (calibration metrics, real-time analytics) —
+that's a separate, not-yet-implemented stream, see `docs/decisions/`.
 
-## Общий код между API и orchestrator
+## Shared code between API and orchestrator
 
-Бизнес-логика запуска алгоритмов (`run_grover`, `run_sat_grover`,
-`run_qpe`, `run_vqe_sync`) переехала в `quantum_core/execution.py` —
-общий модуль с простыми Python-типами (без Pydantic), которым пользуются
-оба сервиса:
+The business logic for running algorithms (`run_grover`,
+`run_sat_grover`, `run_qpe`, `run_vqe_sync`) moved into
+`quantum_core/execution.py` — a shared module using plain Python types
+(no Pydantic) that both services use:
 
-- `services/api/app/routers/experiments.py` — теперь публикует задачу и
-  **не** вызывает `quantum_core.execution` напрямую вообще;
-- `services/orchestrator/app/worker.py` — вызывает `quantum_core.execution`
-  напрямую, разбирая `params` из сообщения очереди.
+- `services/api/app/routers/experiments.py` — now just publishes a task
+  and **doesn't** call `quantum_core.execution` directly at all;
+- `services/orchestrator/app/worker.py` — calls `quantum_core.execution`
+  directly, parsing `params` from the queue message.
 
-Формат сообщений — `quantum_core/tasks.py` (`ExperimentTask`,
-`ExperimentResultMessage`) — простые dataclasses + JSON, без Pydantic,
-чтобы не тащить HTTP-фреймворк в `quantum_core`.
+Message format lives in `quantum_core/tasks.py` (`ExperimentTask`,
+`ExperimentResultMessage`) — plain dataclasses + JSON, no Pydantic, so as
+not to drag an HTTP framework into `quantum_core`.
 
-## Побочный эффект: API стал значительно тоньше
+## Side effect: the API got a lot thinner
 
-Раньше `POST /experiments` для VQE требовал `run_in_threadpool` (чтобы не
-блокировать event loop FastAPI синхронным `run_vqe`). Теперь API вообще
-не исполняет алгоритмы — просто публикует JSON в очередь. Вся забота о
-sync/async-мосте для VQE (`run_vqe` синхронна, использует `asyncio.run()`
-внутри) переехала в `orchestrator`, который решает её через
-`loop.run_in_executor()` — прямой asyncio-эквивалент того же
-`run_in_threadpool`.
+Previously, `POST /experiments` for VQE needed `run_in_threadpool` (so
+the synchronous `run_vqe` wouldn't block FastAPI's event loop). Now the
+API doesn't execute algorithms at all — it just publishes JSON to the
+queue. All the sync/async bridging concern for VQE (`run_vqe` is
+synchronous and uses `asyncio.run()` internally) moved into
+`orchestrator`, which handles it via `loop.run_in_executor()` — the
+direct asyncio equivalent of the same `run_in_threadpool`.
 
-Более неожиданный побочный эффект: раз `api/app/execution.py` удалён, а
-роутер больше не импортирует `quantum_core.algorithms.*` напрямую — **весь
-API-сервис теперь тестируется без установленного Qiskit**. Единственное
-место, где Qiskit вообще упоминается в API — ленивый импорт в
-`get_backend()` (`app/deps.py`), который сейчас не используется роутером
-экспериментов вовсе.
+A more surprising side effect: since `api/app/execution.py` is gone, and
+the router no longer imports `quantum_core.algorithms.*` directly — **the
+entire API service is now testable without Qiskit installed**. The only
+place Qiskit is even mentioned in the API is a lazy import inside
+`get_backend()` (`app/deps.py`), which the experiments router doesn't
+use at all anymore.
 
-## Семантика ack/reject/retry в orchestrator
+## ack/reject/retry semantics in the orchestrator
 
-Три разных случая обрабатываются по-разному:
+Three different cases are handled differently:
 
-1. **Некорректное сообщение** (не парсится JSON, неизвестный алгоритм) —
-   отправляется в dead-letter очередь `experiments.dlq`
-   (`retry_policy.send_to_dead_letter_queue`), исходное — `ack()`.
-   Повторная обработка того же сообщения даст тот же результат — смысла в
-   retry нет, но и терять его молча тоже не стоит (в первой версии
-   `worker.py` такие сообщения именно терялись — это было исправлено).
-2. **Ошибка исполнения алгоритма** (упавшая схема, таймаут backend'а) —
-   задача считается обработанной: результат зафиксирован как `failed` и
-   отправлен в `experiment-results`, исходное сообщение — `ack()`. Это
-   осознанный результат, а не сбой очереди — сюда `retry_policy` не
-   применяется вообще.
-3. **Сбой самого воркера** (обрыв соединения, необработанное исключение
-   до вызова ack/reject) — RabbitMQ автоматически передоставит сообщение
-   (`message.redelivered=True`). Без политики это могло бы продолжаться
-   **бесконечно**, если конкретное сообщение стабильно роняет воркера.
-   `retry_policy.handle_redelivery()` ограничивает это тремя попытками
-   с exponential backoff (2s/4s/8s, счётчик — в заголовке
-   `x-retry-count`), после чего сообщение тоже уходит в `experiments.dlq`.
+1. **Malformed message** (JSON doesn't parse, unknown algorithm) — sent
+   to the `experiments.dlq` dead-letter queue
+   (`retry_policy.send_to_dead_letter_queue`), the original message gets
+   `ack()`'d. Reprocessing the same message would give the same result —
+   there's no point retrying, but silently dropping it isn't right
+   either (the first version of `worker.py` did exactly that — this was
+   fixed).
+2. **Algorithm execution error** (a circuit that fails, a backend
+   timeout) — the task is considered handled: the result is recorded as
+   `failed` and sent to `experiment-results`, the original message gets
+   `ack()`'d. This is a legitimate outcome, not a queue failure — no
+   `retry_policy` applies here at all.
+3. **The worker itself crashing** (connection drop, unhandled exception
+   before ack/reject is called) — RabbitMQ automatically redelivers the
+   message (`message.redelivered=True`). Without a policy, this could go
+   on **forever** if a specific message reliably crashes the worker.
+   `retry_policy.handle_redelivery()` caps this at three attempts with
+   exponential backoff (2s/4s/8s, tracked via the `x-retry-count`
+   header), after which the message also goes to `experiments.dlq`.
 
-Это отдельная политика от retry/backoff в `quantum_core/sync/polling.py`
-— тот отвечает за повтор отдельных вызовов backend'а *внутри* одной
-задачи (submit/poll/fetch на нестабильном, но исправно работающем
-QuantumBackend); `retry_policy.py` — за случай, когда падает сам процесс
-воркера, что backend-level retry исправить не может в принципе.
+This is a separate policy from the retry/backoff in
+`quantum_core/sync/polling.py` — that one handles retrying individual
+backend calls *within* a single task (submit/poll/fetch against a flaky
+but otherwise functioning `QuantumBackend`); `retry_policy.py` handles
+the case where the worker process itself crashes, which backend-level
+retry can't fix by definition.
 
-## Структура `orchestrator`: tasks/ и calibration
+## `orchestrator` structure: tasks/ and calibration
 
-После первой версии `worker.py` содержал всю логику (подключение к
-RabbitMQ, диспетчеризацию по алгоритму, обработку сообщений) в одном
-файле. Вынесено отдельно:
+After the first version, `worker.py` contained all the logic (RabbitMQ
+connection, dispatching by algorithm, message handling) in one file.
+Split out separately:
 
-- `app/tasks/run_experiment.py` — диспетчеризация `task.algorithm` →
-  `quantum_core.execution`. Не знает про `aio-pika` вообще (принимает
-  только `ExperimentTask`, обычный dataclass) — тестируется без
+- `app/tasks/run_experiment.py` — dispatches `task.algorithm` to
+  `quantum_core.execution`. Knows nothing about `aio-pika` at all (only
+  takes an `ExperimentTask`, a plain dataclass) — testable without
   RabbitMQ.
-- `app/tasks/calibration.py` — периодическая проверка backend'а через
-  Bell-состояние (`error_rate` = доля shots с `01`/`10` вместо ожидаемых
-  `00`/`11`). Публикует в очередь `calibration-results` — временная
-  замена Kafka-потока телеметрии из самого первого архитектурного
-  разговора этого проекта. Честная оговорка: `AerBackend` — noiseless,
-  так что `error_rate` пока всегда ~0 — это здоровый health-check
-  ("backend отвечает"), но не источник сигнала о реальном дрейфе, пока
-  не подключена noise-модель или настоящее железо.
-- `app/worker.py` — теперь только RabbitMQ-соединение, запуск
-  calibration-цикла фоновой задачей, и главный consume-loop.
+- `app/tasks/calibration.py` — periodic backend check via a Bell state
+  (`error_rate` = fraction of shots landing on `01`/`10` instead of the
+  expected `00`/`11`). Publishes to the `calibration-results` queue — a
+  temporary stand-in for the Kafka telemetry stream from the very first
+  architecture conversation of this project. Honest caveat: `AerBackend`
+  is noiseless, so `error_rate` is currently always ~0 — this is a valid
+  health check ("the backend responds"), but not a source of signal
+  about real drift, until a noise model or actual hardware is wired in.
+- `app/worker.py` — now just the RabbitMQ connection, starting the
+  calibration cycle as a background task, and the main consume loop.
 
-## ⚠️ Степень проверки
+## ⚠️ Degree of verification
 
-Как и с API-слоем — **ничего из RabbitMQ-кода не запускалось**: у меня
-нет ни `aio-pika`, ни Docker, ни сети. Отдельно стоит отметить конкретную
-вещь, которую я перепроверил веб-поиском перед тем как писать код (а не
-понадеялся на память) — попытка сделать `queue.bind()` на default
-exchange в RabbitMQ **завершается ошибкой** `ACCESS_REFUSED`
-("operation not permitted on the default exchange"): default exchange
-уже автоматически роутит по имени очереди, явный bind не нужен и не
-разрешён. Первая версия `worker.py` эту ошибку содержала — исправлена
-до того, как код был показан.
+As with the API layer — **none of the RabbitMQ code has actually been
+run**: I have neither `aio-pika`, Docker, nor network access. One
+specific thing worth calling out that I double-checked via web search
+before writing the code (rather than relying on memory): calling
+`queue.bind()` on the default exchange in RabbitMQ **fails** with
+`ACCESS_REFUSED` ("operation not permitted on the default exchange") —
+the default exchange already routes by queue name automatically, an
+explicit bind isn't needed and isn't allowed. The first version of
+`worker.py` had this bug — fixed before the code was shown.
 
-`quantum_core/tasks.py` (сериализация задач/результатов) — проверен
-и прогнан локально (round-trip JSON, включая failure-случай) без единого
-внешнего зависимого пакета, чистый stdlib. Арифметика `error_rate` в
-`calibration.py` — тоже проверена отдельно (тривиальная, но для
-консистентности с остальным проектом).
+`quantum_core/tasks.py` (task/result serialization) was verified and run
+locally (JSON round-trip, including the failure case) with zero external
+dependencies, pure stdlib. The `error_rate` arithmetic in
+`calibration.py` was also verified separately (trivial, but for
+consistency with the rest of the project).
 
-## Как запустить целиком
+## Running the whole thing
 
 ```bash
-# из корня репозитория
-docker compose up -d          # поднимает RabbitMQ, UI на localhost:15672 (guest/guest)
+# from the repo root
+docker compose up -d          # brings up RabbitMQ, UI on localhost:15672 (guest/guest)
 
-# терминал 1 — API
+# terminal 1 — API
 cd services/api
 source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 
-# терминал 2 — orchestrator
+# terminal 2 — orchestrator
 cd services/orchestrator
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python3 -m app.worker
 
-# терминал 3 — запрос
+# terminal 3 — request
 curl -X POST http://localhost:8000/experiments \
   -H "Content-Type: application/json" \
   -d '{"algorithm": "grover", "marked_states": ["101"]}'
-# ответ сразу: {"status": "queued", "id": "...", ...}
+# immediate response: {"status": "queued", "id": "...", ...}
 
 curl http://localhost:8000/experiments/<id>
-# через мгновение: {"status": "completed", "result": {...}}
+# a moment later: {"status": "completed", "result": {...}}
 ```
 
-## Пока не реализовано
+## Not yet implemented
 
-- Persistence (Postgres) для store экспериментов — сейчас всё ещё
-  in-memory на стороне API, не переживает рестарт;
-- Несколько воркеров orchestrator для параллельной обработки (сейчас
-  `prefetch_count=1`, один воркер = одна задача единовременно);
-- `retry_policy.py` держит задержку между повторами в event loop воркера
-  (`asyncio.sleep`) — при нескольких воркерах это не даёт освободить
-  сообщение для подхвата другим воркером на время задержки; приемлемо
-  для одного воркера, стоит пересмотреть при масштабировании;
-- Noise-модель для `AerBackend` — без неё `calibration.py` не увидит
-  реального дрейфа (`error_rate` всегда ~0), только подтверждает, что
-  backend вообще отвечает;
-- Kafka-поток телеметрии — `calibration-results` пока просто ещё одна
-  RabbitMQ-очередь, а не настоящий time-series поток, как обсуждалось в
-  первом ADR этого проекта.
+- Persistence (Postgres) for the experiments store — currently still
+  in-memory on the API side, doesn't survive a restart;
+- Multiple orchestrator workers for parallel processing (currently
+  `prefetch_count=1`, one worker = one task at a time);
+- `retry_policy.py` holds the delay between retries in the worker's
+  event loop (`asyncio.sleep`) — with multiple workers this doesn't let
+  the message be picked up by another worker during the delay;
+  acceptable for a single worker, worth revisiting when scaling;
+- A noise model for `AerBackend` — without it, `calibration.py` won't
+  see real drift (`error_rate` is always ~0), it only confirms that the
+  backend is responding at all;
+- The Kafka telemetry stream — `calibration-results` is currently just
+  another RabbitMQ queue, not a real time-series stream, as discussed in
+  the project's first ADR.

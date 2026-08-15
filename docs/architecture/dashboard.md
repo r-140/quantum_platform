@@ -1,119 +1,120 @@
-# Дашборд экспериментов
+# Experiments dashboard
 
-## Что это и почему не Grafana
+## What it is, and why not Grafana
 
-Отдельно от вопроса "как визуализировать calibration/streaming-телеметрию"
-(это Grafana, см. `kafka.md`) — просмотр/сортировка/фильтрация записей об
-экспериментах (данные исследования, не операционные метрики) заслуживает
-собственного инструмента. Grafana технически может нарисовать таблицу из
-Postgres, но:
-- нет нормального drill-down в одну запись с читаемым JSON-результатом;
-- сортировка/фильтры в Grafana rudimentary — заточены под time-series
-  панели, не под data-browsing UX;
-- семантически странно использовать SRE-инструмент для просмотра
-  результатов исследований.
+Separately from the question of "how do we visualize
+calibration/streaming telemetry" (that's Grafana, see `kafka.md`) —
+viewing/sorting/filtering experiment records (research data, not
+operational metrics) deserves its own tool. Grafana can technically draw
+a table from Postgres, but:
+- there's no proper drill-down into a single record with a readable JSON
+  result;
+- Grafana's sorting/filtering is rudimentary — built for time-series
+  panels, not data-browsing UX;
+- it's semantically odd to use an SRE tool to browse research results.
 
-Вместо этого — лёгкий кастомный фронтенд, отдаваемый прямо из `api`
-(`StaticFiles`, без сборки, без npm, один самодостаточный HTML-файл).
-Same-origin с самим API — не нужен CORS.
+Instead: a lightweight custom frontend served directly from `api`
+(`StaticFiles`, no build step, no npm, a single self-contained HTML
+file). Same-origin with the API itself — no CORS needed.
 
-## Дизайн
+## Design
 
-Тема — "control room / осциллограф": тёмная лабораторная консоль,
-monospace-показания для данных (id, время, JSON), вместо клишированных
-AI-дефолтов (кремовый+terracotta или чёрный+кислотный зелёный) и вместо
-типового "синий сайдбар + белые карточки" admin-панели.
+Theme: "control room / oscilloscope" — a dark lab console, monospace
+readouts for data (id, time, JSON), instead of the clichéd AI defaults
+(cream+terracotta or black+acid green) and instead of the typical
+"blue sidebar + white cards" admin panel.
 
-Токены: фон `#0B0E14`, панели `#12161F`, текст `#E4E7EC`/`#7B8494`, акцент
-— коэрентный циан `#4FD1E8`. Статусы: `queued` `#E8B44F` (пульсирующий
-индикатор — единственный анимированный элемент, эксперимент "в полёте"),
-`completed` `#4FE8A0`, `failed` `#E85F5F`. Шрифты: Space Grotesk
-(заголовки/UI-хром), JetBrains Mono (все данные без исключения — id,
-время, длительность, JSON-результат).
+Tokens: background `#0B0E14`, panels `#12161F`, text
+`#E4E7EC`/`#7B8494`, accent — a coherent cyan `#4FD1E8`. Statuses:
+`queued` `#E8B44F` (a pulsing indicator — the only animated element, the
+experiment "in flight"), `completed` `#4FE8A0`, `failed` `#E85F5F`.
+Fonts: Space Grotesk (headings/UI chrome), JetBrains Mono (all data
+without exception — id, time, duration, JSON result).
 
-## Что реализовано
+## What's implemented
 
-**Бэкенд** (`services/api/app/store/`, `app/routers/experiments.py`):
-- `ExperimentStore.list_all()` расширен опциональными
-  `algorithm`/`status`/`sort_desc` — фильтрация и сортировка выполняются
-  на уровне storage (SQL `WHERE`/`ORDER BY` для Postgres, обычный список
-  для in-memory), а не на фронтенде — дашборд не тянет весь список
-  экспериментов, чтобы показать один алгоритм;
-- `ExperimentStore.stats()` — новый метод, агрегация по
-  `(algorithm, status)` с подсчётом — питает summary-заголовок дашборда
-  без необходимости тащить и локально считать весь список на клиенте;
-- `GET /experiments?algorithm=&status=&sort=asc|desc` — query-параметры
-  поверх существующего листинга;
-- `GET /experiments/stats` — агрегаты.
+**Backend** (`services/api/app/store/`, `app/routers/experiments.py`):
+- `ExperimentStore.list_all()` extended with optional
+  `algorithm`/`status`/`sort_desc` — filtering and sorting happen at the
+  storage layer (SQL `WHERE`/`ORDER BY` for Postgres, a plain list for
+  in-memory), not on the frontend — the dashboard doesn't pull the
+  entire experiment list just to show one algorithm;
+- `ExperimentStore.stats()` — a new method, aggregation by
+  `(algorithm, status)` with counts — feeds the dashboard's summary
+  header without having to fetch and locally compute the entire list on
+  the client;
+- `GET /experiments?algorithm=&status=&sort=asc|desc` — query params on
+  top of the existing listing;
+- `GET /experiments/stats` — the aggregates.
 
-⚠️ **Ловушка с порядком роутов**: `GET /experiments/stats` **обязан**
-быть зарегистрирован **до** `GET /experiments/{experiment_id}` — иначе
-FastAPI/Starlette (матчинг роутов в порядке регистрации) перехватит
-`stats` как `experiment_id="stats"`, и стата никогда не будет достигнута.
-Есть отдельный regression-тест
-(`test_stats_route_not_shadowed_by_experiment_id_route`) именно на этот
-случай.
+⚠️ **Route-ordering trap**: `GET /experiments/stats` **must** be
+registered **before** `GET /experiments/{experiment_id}` — otherwise
+FastAPI/Starlette (which matches routes in registration order) will
+intercept `stats` as `experiment_id="stats"`, and the stats route will
+never be reached. There's a dedicated regression test
+(`test_stats_route_not_shadowed_by_experiment_id_route`) for exactly
+this case.
 
-**Фронтенд** (`services/api/static/dashboard/index.html`):
-- Таблица с фильтрами (алгоритм/статус), сортировкой по клику,
-  клиентским поиском по подстроке id;
-- Live-обновление раз в 3 секунды (`setInterval` + `fetch`, без
-  WebSocket/SSE — минимально достаточное решение для этого масштаба);
-- Drill-down в конкретный эксперимент — slide-over панель с полным
-  JSON-результатом.
+**Frontend** (`services/api/static/dashboard/index.html`):
+- A table with filters (algorithm/status), click-to-sort, and
+  client-side substring search on id;
+- Live updates every 3 seconds (`setInterval` + `fetch`, no
+  WebSocket/SSE — the minimal sufficient solution at this scale);
+- Drill-down into a specific experiment — a slide-over panel with the
+  full JSON result.
 
-## Как это проверялось
+## How this was verified
 
-Как и всюду в проекте — то, что можно проверить без реального стека,
-проверено:
-- Логика фильтров/сортировки/`stats()` — прогнана на **реальном**
-  `in_memory.py` (не черновике) с "утиными" заглушками вместо Pydantic
-  (которого нет в моей среде) — все комбинации фильтров, сортировка
-  asc/desc, агрегация;
-- JS-синтаксис дашборда — `node --check` на извлечённом `<script>`-блоке;
-- Чистые функции форматирования (`fmtDuration`, `shortId`, агрегация
-  `totals`) — сверены с **реальными данными** из прогонов `observe.py`
-  (например, `fmtDuration` дал ровно `25.67s` — то же число, что было в
-  твоём логе);
-- По пути поймал собственную опечатку в тестовом ассерте (не в самом
-  коде дашборда) — перепроверил вручную и явно это отметил, а не
-  промолчал.
+As everywhere else in the project — whatever could be checked without a
+real stack, was checked:
+- Filter/sort/`stats()` logic — run against the **real** `in_memory.py`
+  (not a draft) with duck-typed stubs standing in for Pydantic (which
+  isn't available in my environment) — all filter combinations, asc/desc
+  sorting, aggregation;
+- Dashboard JS syntax — `node --check` on the extracted `<script>`
+  block;
+- Pure formatting functions (`fmtDuration`, `shortId`, `totals`
+  aggregation) — checked against **real data** from `observe.py` runs
+  (for instance, `fmtDuration` produced exactly `25.67s` — the same
+  number that showed up in your log);
+- Along the way I caught a typo of my own in a test assertion (not in
+  the dashboard code itself) — double-checked it by hand and flagged it
+  explicitly rather than staying quiet about it.
 
-⚠️ **Не проверено**: сам рендеринг в браузере (вёрстка, анимации,
-реальные `fetch`-запросы к живому API) — у меня нет браузера. Открой
-`http://localhost:8000/dashboard/` и посмотри глазами, особенно во время
-прогона `scripts/observe.py` — интересно, насколько живо ощущается
-3-секундный поллинг под нагрузкой.
+⚠️ **Not verified**: the actual rendering in a browser (layout,
+animations, real `fetch` calls against a live API) — I don't have a
+browser. Open `http://localhost:8000/dashboard/` and take a look
+yourself, especially while `scripts/observe.py` is running — it'll be
+interesting to see how lively the 3-second polling feels under load.
 
-## Как запустить
+## How to run it
 
-Через `./dev.sh` (см. корневой `dev.sh` — теперь поддерживает профили,
-см. ниже) — дашборд поднимется вместе с остальным стеком на
+Via `./dev.sh` (see the root `dev.sh` — now supports profiles, see
+below) — the dashboard comes up together with the rest of the stack at
 `http://localhost:8000/dashboard/`.
 
-### Профили `dev.sh`
+### `dev.sh` profiles
 
-По аналогии с Maven `-P`:
+Modeled on Maven's `-P`:
 ```bash
-./dev.sh                    # profile=quick (по умолчанию) — без тестов
-./dev.sh --profile=verify   # прогоняет pytest каждого сервиса ДО старта
+./dev.sh                    # profile=quick (default) — no tests
+./dev.sh --profile=verify   # runs each service's pytest suite BEFORE starting
 ```
 
-`--profile=verify` останавливает скрипт **до** запуска любого сервиса,
-если хоть один test suite падает — по аналогии с тем, как `mvn verify`
-не даёт `install`/задеплоить, если тесты не прошли. Каждый сервис
-проверяется на наличие `tests/*.py` динамически (не хардкод списком) —
-сервис без тестов просто пропускается, ничего не падает. `quantum-core`
-не имеет своего venv-шага в `dev.sh` (устанавливается editable-зависимостью
-в остальные сервисы), поэтому его тесты в `verify`-профиле запускаются
-через уже готовый venv `api`.
+`--profile=verify` stops the script **before** starting any service if
+even one test suite fails — similar to how `mvn verify` won't let you
+`install`/deploy if the tests don't pass. Each service is dynamically
+checked for `tests/*.py` (not a hardcoded list) — a service without
+tests is simply skipped, nothing fails. `quantum-core` doesn't have its
+own venv step in `dev.sh` (it's installed as an editable dependency into
+the other services), so its tests run under the `verify` profile through
+`api`'s already-set-up venv.
 
-## Пока не реализовано
+## Not yet implemented
 
-- Пагинация — при большом количестве экспериментов `GET /experiments`
-  вернёт весь список разом; пока не проблема при демо-масштабе;
-- Поиск по id — только клиентский (по уже загруженной странице), не
-  server-side substring-поиск через SQL `LIKE`;
-- WebSocket/SSE вместо polling — 3-секундный `setInterval` достаточен
-  для демо, но не масштабируется на много одновременных клиентов
-  дашборда.
+- Pagination — with a large number of experiments, `GET /experiments`
+  returns the entire list at once; not a problem at demo scale yet;
+- Search by id — client-side only (over the already-loaded page), not a
+  server-side substring search via SQL `LIKE`;
+- WebSocket/SSE instead of polling — the 3-second `setInterval` is fine
+  for a demo, but doesn't scale to many simultaneous dashboard clients.

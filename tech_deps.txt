@@ -1,9 +1,18 @@
-classical-quantum loop, это очень релевантно для "hardware/software interaction loops" из требований
+[Note: despite the filename, this isn't a dependency list — it's a
+few informal working notes/ideas the author jotted down. Translated
+as-is below.]
 
-еще хотелось бы больше метрик вокруг vqe_loop.py именно для погружения в hw/sw interaction loops
+classical-quantum loop — this is very relevant to the "hardware/software
+interaction loops" from the requirements
 
+also would like more metrics around vqe_loop.py specifically, to dig
+deeper into hw/sw interaction loops
 
+and this bit: "could later be extended to LiH or BeH₂ if we want to
+show scalability"
 
-и вот это вот Можно потом расширить до LiH или BeH₂, если захочется показать масштабируемость
-
-думаю будет очень полезно мне для того чтобы скоротать неск вечеров за третьим томом ландау лифшица) это помимо масштабируемости. тут кстати можно включить ООП для применения дизайн паттернов, наследия и инкапсулированности. если придется демить и выкладывать код, то лучше делать сразу по best practice
+I think this would also be genuinely useful for me as a way to spend a
+few evenings with volume 3 of Landau & Lifshitz :) — separate from the
+scalability angle. Could also work in OOP here, to apply design
+patterns, inheritance, and encapsulation. If it ever needs to be demoed
+or published, better to build it to best practices from the start.

@@ -1,93 +1,98 @@
 # orchestrator
 
-Воркер, читающий задачи из RabbitMQ (`experiments`), исполняющий их через
-`quantum_core`, и публикующий результат обратно (`experiment-results`) —
-чтобы `api`-сервис мог обновить статус эксперимента. Плюс периодический
-calibration-цикл, проверяющий здоровье backend'а.
+A worker that reads tasks from RabbitMQ (`experiments`), executes them
+via `quantum_core`, and publishes the result back (`experiment-results`)
+so the `api` service can update the experiment's status. Plus a periodic
+calibration cycle that checks the backend's health.
 
-Подробности архитектуры (почему так, семантика ack/reject, побочные
-эффекты для API) — в `docs/architecture/orchestration.md`.
+Architecture details (why it's built this way, ack/reject semantics,
+side effects for the API) live in
+`docs/architecture/orchestration.md`.
 
-## Структура
+## Structure
 
 ```
 orchestrator/
 ├── requirements.txt
 └── app/
-    ├── worker.py             # тонкий shell: RabbitMQ-соединение + consume loop
-    ├── retry_policy.py       # ограниченные повторы + dead-letter queue при крэше воркера
+    ├── worker.py             # thin shell: RabbitMQ connection + consume loop
+    ├── retry_policy.py       # bounded retries + dead-letter queue on worker crash
     └── tasks/
-        ├── run_experiment.py  # диспетчеризация по task.algorithm -> quantum_core.execution
-        └── calibration.py     # периодическая проверка fidelity backend'а
+        ├── run_experiment.py  # dispatches task.algorithm -> quantum_core.execution
+        └── calibration.py     # periodic backend fidelity check
 ```
 
 ### `app/tasks/run_experiment.py`
-`execute_task()` — диспетчеризация по `task.algorithm`, вызывает
-`quantum_core.execution` (тот же общий модуль, которым раньше пользовался
-`api`, пока не переехал на очередь). Ранее жил прямо в `worker.py`;
-вынесен отдельно, чтобы `worker.py` оставался тонким, и чтобы диспетчеризацию
-можно было тестировать без единого обращения к RabbitMQ (эта функция вообще
-не знает про `aio-pika` — только про `ExperimentTask`, обычный dataclass).
+`execute_task()` — dispatches by `task.algorithm`, calls
+`quantum_core.execution` (the same shared module `api` used before
+moving to the queue). Used to live directly in `worker.py`; split out so
+`worker.py` stays thin, and so the dispatching logic can be tested with
+zero RabbitMQ involvement (this function knows nothing about
+`aio-pika` at all — only about `ExperimentTask`, a plain dataclass).
 
 ### `app/tasks/calibration.py`
-Периодическая проверка backend'а: гоняет Bell-состояние (тот же `H`+`CX`,
-что в `demo_aer.py`, уже подтверждённый рабочим), считает `error_rate` —
-долю shots, не согласующихся с идеальной запутанностью (`01`/`10` вместо
-ожидаемых только `00`/`11`).
+Periodic backend check: runs a Bell state (the same `H`+`CX` as in
+`demo_aer.py`, already confirmed working), computes `error_rate` — the
+fraction of shots inconsistent with perfect entanglement (`01`/`10`
+instead of the expected `00`/`11` only).
 
-⚠️ **Честное ограничение**: `AerBackend` — noiseless-симулятор, поэтому
-`error_rate` сегодня всегда читается около `0.0` — дрейфа калибровки
-физически неоткуда взяться. Модуль всё равно ценен как реальный health-check
-(backend отвечает, схемы ведут себя как ожидается), и это естественное
-место для подключения noise-модели Aer или реального железа в будущем —
-логика подсчёта `error_rate` от этого не изменится.
+⚠️ **Honest limitation**: `AerBackend` is a noiseless simulator, so
+`error_rate` currently always reads around `0.0` — there's physically
+nowhere for calibration drift to come from. The module is still valuable
+as a genuine health check (the backend responds, circuits behave as
+expected), and this is the natural place to plug in an Aer noise model
+or real hardware later on — the `error_rate` computation logic wouldn't
+change.
 
-Результаты сейчас публикуются в RabbitMQ-очередь `calibration-results` —
-это временная замена Kafka-потока телеметрии, который обсуждался в самом
-первом архитектурном разговоре этого проекта (RabbitMQ — для task queue,
-Kafka — для time-series телеметрии; см. `docs/architecture/orchestration.md`).
-Переход на Kafka не должен потребовать менять `run_calibration()` — только
-`publish_calibration_result()`.
+Results are currently published to the `calibration-results` RabbitMQ
+queue — a temporary stand-in for the Kafka telemetry stream discussed in
+this project's very first architecture conversation (RabbitMQ for the
+task queue, Kafka for time-series telemetry; see
+`docs/architecture/orchestration.md`). Moving to Kafka shouldn't require
+changing `run_calibration()` — only `publish_calibration_result()`.
 
-Можно запустить разово вручную (без RabbitMQ, печатает результат в stdout):
+Can be run once manually (no RabbitMQ needed, prints the result to
+stdout):
 ```bash
 python3 -m app.tasks.calibration
 ```
 
 ### `app/retry_policy.py`
-Отдельная от `quantum_core.sync.polling` политика — та отвечает за retry
-отдельных вызовов backend'а *внутри* одной задачи; эта — за то, что
-происходит, когда воркер падает **до** ack/reject сообщения целиком
-(обрыв соединения, необработанное исключение). Без этой политики RabbitMQ
-передоставлял бы такое сообщение **бесконечно**, если оно стабильно роняет
-воркера ("poison message").
+A policy separate from `quantum_core.sync.polling` — that one handles
+retrying individual backend calls *within* a single task; this one
+handles what happens when the worker crashes **before** ack/reject-ing a
+message at all (connection drop, unhandled exception). Without this
+policy, RabbitMQ would redeliver such a message **forever** if it
+reliably crashes the worker (a "poison message").
 
-- `handle_redelivery()` — вызывается первым для каждого сообщения; если
-  `message.redelivered=True` (RabbitMQ уже пыталось доставить это
-  сообщение и не получило ack/reject), решает: повторить с exponential
-  backoff (до `MAX_RETRIES=3`, задержки 2s/4s/8s) или отправить в
-  `experiments.dlq` (dead-letter очередь для ручного разбора);
-  - счётчик повторов — в заголовке сообщения `x-retry-count`, который
-    ведёт сам код (не полагается на встроенный механизм RabbitMQ
-    `x-death`/TTL+DLX — так проще проверить логику без живого брокера).
-- Malformed-сообщения (не парсится JSON) тоже попадают в `experiments.dlq`,
-  а не пропадают молча, как было в первой версии `worker.py`.
+- `handle_redelivery()` — called first for every message; if
+  `message.redelivered=True` (RabbitMQ already tried to deliver this
+  message and got no ack/reject), decides whether to retry with
+  exponential backoff (up to `MAX_RETRIES=3`, delays 2s/4s/8s) or send
+  it to `experiments.dlq` (a dead-letter queue for manual triage);
+  - the retry counter lives in the `x-retry-count` message header,
+    tracked by the code itself (not relying on RabbitMQ's built-in
+    `x-death`/TTL+DLX mechanism — simpler to verify the logic without a
+    live broker).
+- Malformed messages (JSON that doesn't parse) also end up in
+  `experiments.dlq`, instead of silently vanishing as they did in the
+  first version of `worker.py`.
 
 ### `app/worker.py`
-Теперь только: подключение к RabbitMQ, запуск фонового
-`run_calibration_loop()` (по умолчанию раз в 5 минут, настраивается через
-`CALIBRATION_INTERVAL_S`), и главный consume-loop с `prefetch_count=1`
-(одна задача одновременно на воркер — для параллелизма запускай несколько
-процессов `worker.py`, а не поднимай `prefetch_count`, пока не будет
-измерено, что это узкое место).
+Now just: the RabbitMQ connection, starting the background
+`run_calibration_loop()` (every 5 minutes by default, configurable via
+`CALIBRATION_INTERVAL_S`), and the main consume loop with
+`prefetch_count=1` (one task at a time per worker — for parallelism, run
+multiple `worker.py` processes rather than raising `prefetch_count`,
+until it's actually measured to be the bottleneck).
 
-VQE (единственный синхронный алгоритм в `quantum_core.execution`)
-оффлоадится через `asyncio.get_running_loop().run_in_executor()` — тот же
-приём, что `run_in_threadpool` на стороне API, только без Starlette.
+VQE (the only synchronous algorithm in `quantum_core.execution`) is
+offloaded via `asyncio.get_running_loop().run_in_executor()` — the same
+trick as `run_in_threadpool` on the API side, just without Starlette.
 
-## Как запустить
+## How to run it
 
-Требуется работающий RabbitMQ (`docker compose up -d` из корня репозитория).
+Requires a running RabbitMQ (`docker compose up -d` from the repo root).
 
 ```bash
 cd services/orchestrator
@@ -97,32 +102,35 @@ pip install -r requirements.txt
 python3 -m app.worker
 ```
 
-⚠️ Именно `python3 -m app.worker`, не `python3 app/worker.py` — второе
-падает с `ModuleNotFoundError: No module named 'app'`, потому что модули
-здесь используют абсолютные импорты (`from app import retry_policy`),
-которым нужен `services/orchestrator/` (родитель `app/`) на `sys.path`.
-`-m` добавляет его туда автоматически; прямой запуск файла — нет.
+⚠️ Specifically `python3 -m app.worker`, not `python3 app/worker.py` —
+the latter fails with `ModuleNotFoundError: No module named 'app'`,
+because the modules here use absolute imports (`from app import
+retry_policy`), which need `services/orchestrator/` (the parent of
+`app/`) on `sys.path`. `-m` adds it automatically; running the file
+directly does not.
 
-Переменные окружения: `RABBITMQ_URL` (по умолчанию
-`amqp://guest:guest@localhost/`), `CALIBRATION_INTERVAL_S` (по умолчанию
-`300` — раз в 5 минут).
+Environment variables: `RABBITMQ_URL` (default
+`amqp://guest:guest@localhost/`), `CALIBRATION_INTERVAL_S` (default
+`300` — every 5 minutes).
 
-## ⚠️ Степень проверки
+## ⚠️ Degree of verification
 
-**Ничего здесь не запускалось** — нет ни `aio-pika`, ни Docker, ни сети в
-моей среде. Код написан по официальной документации `aio-pika` (проверил
-актуальный API через веб-поиск) — включая один конкретный момент, который
-специально перепроверил и из-за которого переписал код: явный `bind()` на
-default exchange RabbitMQ **запрещён** (`ACCESS_REFUSED`), т.к. очередь
-уже автоматически доступна через default exchange по своему имени.
+**Nothing here has actually been run** — I have neither `aio-pika`,
+Docker, nor network access in my environment. The code was written
+against `aio-pika`'s official docs (checked the current API via web
+search) — including one specific point I double-checked and rewrote the
+code because of: an explicit `bind()` on RabbitMQ's default exchange is
+**forbidden** (`ACCESS_REFUSED`), since a queue is already automatically
+reachable through the default exchange by its own name.
 
-Чистую логику backoff/retry-count в `retry_policy.py` и арифметику
-`error_rate` в `calibration.py` проверил отдельно, без `aio-pika`.
+Checked the pure backoff/retry-count logic in `retry_policy.py` and the
+`error_rate` arithmetic in `calibration.py` separately, without
+`aio-pika`.
 
-**Обязательно прогони end-to-end сценарий** (см.
-`docs/architecture/orchestration.md`, раздел "Как запустить целиком") и
-пришли результат — включая логи самого воркера: там должны появиться
-строки вида `processing experiment_id=... algorithm=grover`,
-`experiment_id=... -> completed`, и (если подождать 5 минут, либо
-временно понизить `CALIBRATION_INTERVAL_S` для проверки) строка вида
+**Make sure to run the end-to-end scenario** (see
+`docs/architecture/orchestration.md`, "Running the whole thing" section)
+and send the results — including the worker's own logs: you should see
+lines like `processing experiment_id=... algorithm=grover`,
+`experiment_id=... -> completed`, and (if you wait 5 minutes, or
+temporarily lower `CALIBRATION_INTERVAL_S` to check sooner) a line like
 `calibration cycle: error_rate=0.0000 shots=1024`.

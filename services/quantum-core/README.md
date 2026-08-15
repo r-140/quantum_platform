@@ -1,11 +1,12 @@
 # quantum-core
 
-Библиотека (не сервис) с абстракцией квантовых backend'ов, механизмом
-синхронизации hardware/software interaction loop и (по мере реализации)
-самими квантовыми алгоритмами. Используется сервисами `api` и
-`orchestrator`, а также может запускаться отдельно для экспериментов/демо.
+A library (not a service) providing an abstraction over quantum
+backends, a synchronization mechanism for the hardware/software
+interaction loop, and (as they get implemented) the quantum algorithms
+themselves. Used by the `api` and `orchestrator` services, and can also
+be run standalone for experiments/demos.
 
-## Структура и назначение файлов
+## Structure and file purposes
 
 ```
 quantum-core/
@@ -15,291 +16,305 @@ quantum-core/
 ├── demo_aer.py
 └── quantum_core/
     ├── backends/
-    │   ├── base.py              # абстрактный контракт QuantumBackend
-    │   ├── mock_hw_backend.py   # фейковое "железо" для разработки без QPU
-    │   └── aer_backend.py       # реальный симулятор (Qiskit Aer)
+    │   ├── base.py              # abstract QuantumBackend contract
+    │   ├── mock_hw_backend.py   # fake "hardware" for development without a QPU
+    │   └── aer_backend.py       # a real simulator (Qiskit Aer)
     ├── sync/
-    │   └── polling.py           # синхронизация hw/sw loop (retry/backoff/circuit breaker)
+    │   └── polling.py           # hw/sw loop synchronization (retry/backoff/circuit breaker)
     ├── algorithms/
-    │   ├── grover.py            # "hello world": поиск, ответ уже известен заранее
-    │   ├── sat_search.py        # настоящий поиск: SAT-критерий через PhaseOracleGate
-    │   ├── qft.py                # QFT / inverse-QFT (переиспользуемый примитив)
+    │   ├── grover.py            # "hello world": search where the answer is already known
+    │   ├── sat_search.py        # real search: a SAT criterion via PhaseOracleGate
+    │   ├── qft.py                # QFT / inverse-QFT (a reusable primitive)
     │   ├── qpe.py                # Quantum Phase Estimation
-    │   └── vqe.py                 # VQE: гамильтониан H2, ansatz, измерения по термам
+    │   └── vqe.py                 # VQE: H2 Hamiltonian, ansatz, per-term measurements
     ├── loops/
-    │   └── vqe_loop.py             # замкнутый classical-quantum feedback loop
-    ├── execution.py                 # общая логика "запусти этот алгоритм" -- используется api и orchestrator
-    └── tasks.py                     # сообщения очереди (ExperimentTask/ExperimentResultMessage)
+    │   └── vqe_loop.py             # the closed classical-quantum feedback loop
+    ├── execution.py                 # shared "run this algorithm" logic -- used by api and orchestrator
+    └── tasks.py                     # queue messages (ExperimentTask/ExperimentResultMessage)
 
 tests/unit/
-├── conftest.py                     # fixture fake_clock (без реального ожидания)
-├── fakes.py                        # ScriptedBackend -- тестовый дублёр QuantumBackend
+├── conftest.py                     # fake_clock fixture (no real waiting)
+├── fakes.py                        # ScriptedBackend -- test double for QuantumBackend
 ├── test_circuit_breaker.py
 └── test_wait_for_result.py
 ```
 
 ### `quantum_core/backends/base.py`
-Граница hardware/software. Определяет:
-- `Circuit`, `JobHandle`, `ExperimentResult`, `JobStatus` — общие типы данных;
-- `QuantumBackend` — абстрактный класс с методами `submit`, `poll_status`,
-  `fetch_result`, `cancel`. Любой backend (симулятор, мок, реальный QPU)
-  должен реализовать этот интерфейс;
-- `TransientBackendError` — отдельный тип ошибки для retryable-сбоев
-  (в отличие от жёсткого отказа железа).
+The hardware/software boundary. Defines:
+- `Circuit`, `JobHandle`, `ExperimentResult`, `JobStatus` — shared data
+  types;
+- `QuantumBackend` — an abstract class with `submit`, `poll_status`,
+  `fetch_result`, `cancel` methods. Any backend (simulator, mock, real
+  QPU) must implement this interface;
+- `TransientBackendError` — a distinct error type for retryable
+  failures (as opposed to a hard hardware failure).
 
-Ничего не запускает сам — это только контракт, на который опираются все
-остальные файлы.
+Doesn't run anything itself — it's just the contract everything else
+relies on.
 
 ### `quantum_core/backends/mock_hw_backend.py`
-Реализация `QuantumBackend`, имитирующая реальное железо:
-- случайная задержка в очереди и время выполнения;
-- случайные transient-сбои (например, "идёт калибровка") и жёсткие сбои
-  (например, "ошибка считывания кубита");
-- параметры (`transient_failure_rate`, `hard_failure_rate`,
-  `min_queue_s`/`max_queue_s` и т.д.) позволяют настраивать, насколько
-  "капризным" должен быть backend — удобно для тестирования retry-логики.
+A `QuantumBackend` implementation simulating real hardware:
+- random queue delay and execution time;
+- random transient failures (e.g. "calibration in progress") and hard
+  failures (e.g. "qubit readout error");
+- parameters (`transient_failure_rate`, `hard_failure_rate`,
+  `min_queue_s`/`max_queue_s`, etc.) let you tune how "temperamental"
+  the backend should be — handy for testing retry logic.
 
-Нужен, чтобы разрабатывать и проверять оркестрацию без доступа к реальному
-квантовому компьютеру.
+Needed so orchestration can be developed and checked without access to
+real quantum hardware.
 
 ### `quantum_core/sync/polling.py`
-Механизм ожидания результата от backend'а:
-- `wait_for_result()` — основная функция: опрашивает `poll_status` с
-  адаптивным backoff (экспоненциально растущий интервал), обрабатывает
-  transient-ошибки с ограниченным числом retry, поддерживает таймаут;
-- `CircuitBreaker` — перестаёт опрашивать backend после серии подряд идущих
-  отказов, чтобы не "долбить" явно нездоровое железо; через заданное время
-  пробует снова (half-open);
-- `CancellationToken` — кооперативная отмена: caller может прервать
-  ожидание, и текущая job будет отменена на backend'е.
+The mechanism for waiting on a result from a backend:
+- `wait_for_result()` — the main function: polls `poll_status` with
+  adaptive backoff (an exponentially growing interval), handles
+  transient errors with a bounded number of retries, supports a
+  timeout;
+- `CircuitBreaker` — stops polling the backend after a run of
+  consecutive failures, so it doesn't keep hammering clearly unhealthy
+  hardware; tries again after a set time (half-open);
+- `CancellationToken` — cooperative cancellation: the caller can
+  interrupt waiting, and the current job gets cancelled on the backend.
 
-Это и есть та самая "synchronization mechanism for hardware/software
-interaction loops" из требований вакансии — сюда стоит смотреть в первую
-очередь при код-ревью.
+This is the actual "synchronization mechanism for hardware/software
+interaction loops" from the original job requirements — the first place
+worth looking during code review.
 
 ### `quantum_core/backends/aer_backend.py`
-Реальный backend на **Qiskit Aer** (`AerSimulator`) — первый backend в
-проекте, который действительно выполняет квантовую схему, а не
-подделывает результат.
+A real backend on **Qiskit Aer** (`AerSimulator`) — the first backend in
+the project that genuinely executes a quantum circuit rather than
+faking a result.
 
-Важные детали реализации:
-- `circuit.payload` для этого backend'а должен быть объектом
-  `qiskit.QuantumCircuit` с уже добавленными измерениями (`.measure_all()`).
-  Абстракция `Circuit` в `base.py` не навязывает конкретный SDK, поэтому
-  ответственность за то, что лежит в `payload`, — на конкретной реализации
-  backend'а;
-- `AerSimulator.run()` — синхронный и блокирующий вызов. Чтобы не блокировать
-  event loop (от которого зависит вся остальная асинхронная оркестрация),
-  фактический запуск симуляции выполняется в отдельном потоке через
-  `loop.run_in_executor()`. Job проходит по тем же статусам
-  `QUEUED → RUNNING → COMPLETED/FAILED`, что и у `MockHardwareBackend` —
-  снаружи (для `polling.py`) оба backend'а выглядят одинаково;
-- `cancel()` — best-effort: реальную симуляцию, которая уже стартовала в
-  потоке, отменить нельзя (ограничение самого Aer), поэтому отмена работает
-  только для job'ов, которые ещё в `QUEUED`.
+Important implementation details:
+- `circuit.payload` for this backend must be a `qiskit.QuantumCircuit`
+  object with measurements already added (`.measure_all()`). The
+  `Circuit` abstraction in `base.py` doesn't force a specific SDK, so
+  responsibility for what goes into `payload` sits with the specific
+  backend implementation;
+- `AerSimulator.run()` is a synchronous, blocking call. To avoid
+  blocking the event loop (which the rest of the async orchestration
+  depends on), the actual simulation run happens in a separate thread
+  via `loop.run_in_executor()`. The job goes through the same
+  `QUEUED → RUNNING → COMPLETED/FAILED` statuses as
+  `MockHardwareBackend` — from the outside (for `polling.py`), both
+  backends look identical;
+- `cancel()` is best-effort: a real simulation already running in a
+  thread can't be cancelled (a limitation of Aer itself), so
+  cancellation only works for jobs still in `QUEUED`.
 
-⚠️ **Не проверено запуском.** Код написан по актуальному API Qiskit Aer
-0.17.x (проверено через документацию), но в моей рабочей среде нет доступа
-к сети/pip, поэтому я не смог физически запустить `AerSimulator` и убедиться
-в отсутствии опечаток или несовпадений версий. В отличие от файлов с
-mock-backend'ом (которые я прогонял и показывал реальный вывод), здесь
-нужно, чтобы **ты запустил `demo_aer.py` первым** и сообщил, если что-то
-не сойдётся — например, если версия `qiskit`/`qiskit-aer` у тебя новее и
-какой-то метод переименован.
+⚠️ **Not verified by actually running it.** The code was written
+against the current Qiskit Aer 0.17.x API (checked via the docs), but my
+working environment has no network/pip access, so I couldn't physically
+run `AerSimulator` and confirm there are no typos or version mismatches.
+Unlike the mock-backend files (which I did run and show real output
+for), here **you need to run `demo_aer.py` first** and let me know if
+anything doesn't line up — for example, if your `qiskit`/`qiskit-aer`
+version is newer and some method has been renamed.
 
 ### `quantum_core/algorithms/grover.py`
-Первый настоящий квантовый алгоритм в проекте. Реализует поиск отмеченных
-записей в неиндексированном пространстве из N = 2ⁿ элементов —
-классически O(N) проверок, Grover — O(√N).
+The first real quantum algorithm in the project. Implements searching
+for marked entries in an unindexed space of N = 2ⁿ elements —
+classically O(N) checks, Grover — O(√N).
 
-- `GroverProblem` — описание задачи (число кубитов + список отмеченных
-  битовых строк);
-- `optimal_iterations()` — расчёт оптимального числа итераций
-  (`⌊(π/4)·√(N/M)⌋`); важно не захардкодить произвольное число — после
-  оптимума вероятность успеха снова падает;
-- `build_grover_circuit()` — строит `qiskit.QuantumCircuit`, который можно
-  передать как `Circuit.payload` в `AerBackend`.
+- `GroverProblem` — the problem description (number of qubits + list of
+  marked bit strings);
+- `optimal_iterations()` — computes the optimal iteration count
+  (`⌊(π/4)·√(N/M)⌋`); important not to hardcode an arbitrary number —
+  past the optimum, success probability drops again;
+- `build_grover_circuit()` — builds a `qiskit.QuantumCircuit` that can
+  be passed as `Circuit.payload` to `AerBackend`.
 
-Оракул и диффузор построены через multi-controlled Z (`H`–`mcx`–`H`), а не
-через готовые Qiskit-хелперы (`PhaseOracle`) — это избегает опциональной
-зависимости от `tweedledum`.
+The oracle and diffuser are built via multi-controlled Z (`H`–`mcx`–`H`),
+rather than via Qiskit's ready-made helpers (`PhaseOracle`) — this
+avoids an optional dependency on `tweedledum`.
 
-⚠️ **Степень проверки**: сама математика алгоритма (оракул + диффузор как
-матрицы) проверена независимо через numpy без Qiskit — для 3 кубитов и
-одного отмеченного состояния получено 94.5% вероятности успеха против
-12.5% при случайном угадывании, что подтверждает корректность логики.
-Однако конкретный перевод в Qiskit-вызовы (`qc.mcx`, `qc.h(range(n))` и
-т.д.) я не прогонял — как и с `aer_backend.py`, у меня нет доступа к сети
-для установки `qiskit`. Прогони `demo_grover.py` первым и пришли результат.
+⚠️ **Degree of verification**: the algorithm's math itself (oracle +
+diffuser as matrices) was verified independently via numpy without
+Qiskit — for 3 qubits and one marked state, got a 94.5% success
+probability versus 12.5% for random guessing, confirming the logic is
+correct. However, the specific translation into Qiskit calls (`qc.mcx`,
+`qc.h(range(n))`, etc.) hasn't been run — as with `aer_backend.py`, I
+don't have network access to install `qiskit`. Run `demo_grover.py`
+first and send the result.
 
 ### `demo_grover.py`
-Строит задачу поиска на 3 кубитах (8 записей), ищет отмеченную запись
-`101`, запускает через `AerBackend` и тот же `wait_for_result()`. Ожидаемый
-результат — гистограмма, где `101` встречается заметно чаще остальных
-(в районе 900+ из 1024 shots при 2 итерациях, по аналогии с numpy-проверкой
-выше — точные числа будут немного отличаться из-за seed/шума транспиляции).
+Builds a search problem over 3 qubits (8 entries), searches for the
+marked entry `101`, runs it through `AerBackend` and the same
+`wait_for_result()`. Expected result: a histogram where `101` shows up
+noticeably more often than the rest (around 900+ out of 1024 shots at 2
+iterations, consistent with the numpy check above — exact numbers will
+differ slightly due to seed/transpilation noise).
 
 ### `quantum_core/algorithms/sat_search.py`
-Более реалистичная версия Grover: критерий поиска — булево выражение
-(SAT-клоз), а не заранее известный ответ. Оракул строится через
-`qiskit.circuit.library.PhaseOracleGate` (современная замена старому
-`PhaseOracle`/`classical_function`, которые зависели от внешней библиотеки
-`tweedledum`, убранной в Qiskit 2.0).
+A more realistic version of Grover: the search criterion is a boolean
+expression (a SAT clause), not a pre-known answer. The oracle is built
+via `qiskit.circuit.library.PhaseOracleGate` (the modern replacement for
+the old `PhaseOracle`/`classical_function`, which depended on the
+external `tweedledum` library, removed in Qiskit 2.0).
 
-- `BooleanSearchProblem(variables, expression)` — задача через критерий;
-- `eval_boolean_expression()` — классический evaluator того же синтаксиса
-  (`&`/`|`/`~`/`^`), что понимает `PhaseOracleGate`. Используется и для
-  brute-force подсчёта числа решений (только для демо — в реальной задаче
-  это свело бы на нет смысл использования Grover), и для проверки
-  квантового результата;
-- `build_sat_grover_circuit(problem, iterations)` — собирает схему.
+- `BooleanSearchProblem(variables, expression)` — the problem defined by
+  a criterion;
+- `eval_boolean_expression()` — a classical evaluator for the same
+  syntax (`&`/`|`/`~`/`^`) that `PhaseOracleGate` understands. Used both
+  for brute-force counting the number of solutions (demo-only — in a
+  real problem this would defeat the point of using Grover) and for
+  checking the quantum result;
+- `build_sat_grover_circuit(problem, iterations)` — assembles the
+  circuit.
 
-⚠️ **Степень проверки**: `eval_boolean_expression`/`count_solutions`
-проверены и сверены с независимой brute-force реализацией (см. код -
-7 решений на 16 комбинациях, совпадение подтверждено). Интеграция с
-`PhaseOracleGate` и порядок кубит/переменных — **не** прогонялись через
-реальный Qiskit. Прогони `demo_sat_grover.py` первым.
+⚠️ **Degree of verification**: `eval_boolean_expression`/
+`count_solutions` were verified against an independent brute-force
+implementation (see the code — 7 solutions out of 16 combinations, match
+confirmed). Integration with `PhaseOracleGate` and qubit/variable
+ordering **haven't** been run against real Qiskit. Run
+`demo_sat_grover.py` first.
 
-Подробности про ограничения этого подхода (неизвестное число решений,
-QRAM, где Grover не подходит) — в `docs/algorithms/grover.md`.
+Details on this approach's limitations (unknown number of solutions,
+QRAM, where Grover doesn't fit) are in `docs/algorithms/grover.md`.
 
 ### `demo_sat_grover.py`
-Решает небольшой SAT-клоз на 4 переменных: `(x0 | x1) & (~x1 | x2) & (x0 | ~x3)`.
-Ответ нигде не захардкожен — только само условие. Brute-force подсчёт
-решений используется исключительно для выбора числа итераций (обоснование
-в докстринге `count_solutions`). В конце квантовый результат сверяется с
-классическим evaluator'ом.
+Solves a small SAT clause over 4 variables:
+`(x0 | x1) & (~x1 | x2) & (x0 | ~x3)`. The answer isn't hardcoded
+anywhere — only the condition itself. Brute-force solution counting is
+used solely to pick the iteration count (rationale in the
+`count_solutions` docstring). At the end, the quantum result is checked
+against the classical evaluator.
 
-### `quantum_core/algorithms/qft.py` и `qpe.py`
-Quantum Fourier Transform и Quantum Phase Estimation — оценка собственной
-фазы унитарного оператора. В отличие от Grover (усиление амплитуды),
-это спектральный метод: считывает фазу через конструктивную интерференцию.
+### `quantum_core/algorithms/qft.py` and `qpe.py`
+Quantum Fourier Transform and Quantum Phase Estimation — estimating a
+unitary operator's eigenphase. Unlike Grover (amplitude amplification),
+this is a spectral method: it reads out phase via constructive
+interference.
 
-`qft.py` — переиспользуемый примитив (`build_qft_circuit`), не зависит от
-QPE. `qpe.py` строит полную схему QPE (`build_qpe_circuit`) поверх него,
-с controlled-U^(2^j) через точное матричное возведение в степень.
+`qft.py` is a reusable primitive (`build_qft_circuit`), independent of
+QPE. `qpe.py` builds the full QPE circuit (`build_qpe_circuit`) on top
+of it, with controlled-U^(2^j) via exact matrix exponentiation.
 
-⚠️ **Степень проверки**: сама математика (QFT/inverse-QFT против прямого
-DFT, и полный QPE-пайплайн для точно/неточно представимой фазы) проверена
-независимо через numpy — **и с первого раза не сошлась** (65% ошибка),
-баг был найден через перебор конвенций конкретно потому, что я
-перепроверил математику до переноса в Qiskit, а не после. Сами вызовы
-Qiskit API (`qc.cp`, `Operator.power`, `UnitaryGate(...).control(1)`,
-`qc.compose`) не прогонялись — нет сети. Подробности — в
-`docs/algorithms/qft_qpe.md`. Прогони `demo_qpe.py` первым.
+⚠️ **Degree of verification**: the math itself (QFT/inverse-QFT against
+direct DFT, and the full QPE pipeline for exactly/inexactly
+representable phase) was verified independently via numpy — **and
+didn't match on the first try** (65% error); the bug was found by
+enumerating conventions specifically because the math was double-checked
+before porting to Qiskit, not after. The actual Qiskit API calls
+(`qc.cp`, `Operator.power`, `UnitaryGate(...).control(1)`, `qc.compose`)
+haven't been run — no network access. Details in
+`docs/algorithms/qft_qpe.md`. Run `demo_qpe.py` first.
 
 ### `demo_qpe.py`
-Восстанавливает известную фазу `φ=5/8` через `PhaseGate` и его `|1⟩`
-собственное состояние. Ожидаемый результат — `101` с вероятностью,
-близкой к 100%. Флаг `--inexact` показывает случай, когда фаза не
-представима точно в 3 битах — результат размазывается по соседним
-значениям (это ожидаемое поведение QPE, не баг).
+Recovers the known phase `φ=5/8` via a `PhaseGate` and its `|1⟩`
+eigenstate. Expected result: `101` with probability close to 100%. The
+`--inexact` flag shows a case where the phase isn't exactly
+representable in 3 bits — the result spreads across neighboring values
+(this is expected QPE behavior, not a bug).
 
-### `quantum_core/algorithms/vqe.py` и `quantum_core/loops/vqe_loop.py`
-VQE для энергии основного состояния H₂ — NISQ-дружественная альтернатива
-QPE, и **главная демонстрация hw/sw interaction loop** в проекте: в
-отличие от Grover/QPE (одна схема, одно измерение), VQE — это буквально
-цикл "классический оптимизатор ↔ квантовое железо", повторяющийся десятки
-раз.
+### `quantum_core/algorithms/vqe.py` and `quantum_core/loops/vqe_loop.py`
+VQE for the H₂ ground-state energy — a NISQ-friendly alternative to QPE,
+and **the project's main demonstration of the hw/sw interaction loop**:
+unlike Grover/QPE (one circuit, one measurement), VQE is literally a
+"classical optimizer ↔ quantum hardware" loop, repeating dozens of
+times.
 
-`vqe.py` — гамильтониан H₂ (коэффициенты из O'Malley et al., Phys. Rev. X
-6, 031007), 4-параметрический hardware-efficient ansatz, построение схем
-измерения по термам Паули, восстановление `⟨P⟩` из counts.
+`vqe.py` — the H₂ Hamiltonian (coefficients from O'Malley et al., Phys.
+Rev. X 6, 031007), a 4-parameter hardware-efficient ansatz, building
+measurement circuits per Pauli term, recovering `⟨P⟩` from counts.
 
-`vqe_loop.py` — `evaluate_energy()` (один полный classical-quantum round
-trip по всем термам гамильтониана через `wait_for_result`) и `run_vqe()`
-(цикл с `scipy.optimize.minimize`, метод COBYLA).
+`vqe_loop.py` — `evaluate_energy()` (one full classical-quantum round
+trip across all Hamiltonian terms via `wait_for_result`) and
+`run_vqe()` (the loop using `scipy.optimize.minimize`, COBYLA method).
 
-⚠️ **sync/async мост**: `scipy.optimize` — синхронный API, весь
-`QuantumBackend` — асинхронный. `run_vqe()` — единственная **синхронная**
-функция среди всех точек входа проекта, мостит через `asyncio.run()` на
-каждой итерации. Это специально проверено на реальном
-`MockHardwareBackend` этого проекта перед использованием (не на заглушке)
-— без этой проверки легко словить `RuntimeError` про уже запущенный event
-loop. Из-за этого `demo_vqe.py` — единственное демо, где `main()` **не**
-обёрнут в `asyncio.run()`. Подробности — в `docs/algorithms/vqe.md`.
+⚠️ **The sync/async bridge**: `scipy.optimize` has a synchronous API,
+while all of `QuantumBackend` is asynchronous. `run_vqe()` is the only
+**synchronous** function among all of the project's entry points,
+bridging via `asyncio.run()` on every iteration. This was specifically
+checked against this project's real `MockHardwareBackend` before use
+(not a stub) — without that check, it's easy to hit a `RuntimeError`
+about an already-running event loop. Because of this, `demo_vqe.py` is
+the one demo where `main()` is **not** wrapped in `asyncio.run()`.
+Details in `docs/algorithms/vqe.md`.
 
-⚠️ **Степень проверки**: математика (гамильтониан, ansatz, базисные
-повороты X/Y/Z, знаковая формула, полный measurement-based pipeline,
-сходимость с 8192 shots — разница с точным значением 0.0015 Hartree,
-меньше "химической точности") проверена независимо через numpy/scipy —
-подробнее и строже, чем для предыдущих алгоритмов, так как здесь больше
-движущихся частей. Конкретные Qiskit-вызовы — не прогонялись. Прогони
-`demo_vqe.py` первым.
+⚠️ **Degree of verification**: the math (Hamiltonian, ansatz, X/Y/Z
+basis rotations, the sign formula, the full measurement-based pipeline,
+convergence with 8192 shots — 0.0015 Hartree off the exact value, below
+"chemical accuracy") was verified independently via numpy/scipy — in
+more depth and more rigorously than for previous algorithms, since there
+are more moving parts here. The specific Qiskit calls haven't been run.
+Run `demo_vqe.py` first.
 
 ### `demo_vqe.py`
-Находит энергию основного состояния H₂ через полный feedback loop на
-`AerBackend`. Ожидаемый результат — итоговая энергия в районе `-1.14`
-Hartree (близко к литературному `-1.137`), с логом сходимости по
-итерациям. Медленнее предыдущих демо — до 5 отправок схем на итерацию,
-десятки итераций COBYLA.
+Finds the H₂ ground-state energy via the full feedback loop on
+`AerBackend`. Expected result: a final energy around `-1.14` Hartree
+(close to the literature value of `-1.137`), with a convergence log
+across iterations. Slower than the previous demos — up to 5 circuit
+submissions per iteration, dozens of COBYLA iterations.
 
 ### `quantum_core/execution.py`
-Общая бизнес-логика "запусти этот алгоритм" — по одной функции на каждый
-алгоритм (`run_grover`, `run_sat_grover`, `run_qpe`, `run_vqe_sync`),
-принимающие простые Python-типы (списки, строки, числа), а не Pydantic
-или другие framework-specific объекты. Появился при переходе на
-оркестрацию через RabbitMQ (см. `docs/architecture/orchestration.md`) —
-раньше эта логика жила прямо в `services/api/app/execution.py` и была
-привязана к Pydantic-схемам API; теперь и `api`, и `orchestrator`
-пользуются одним и тем же кодом, каждый со своим тонким адаптером поверх
-него (HTTP-запрос → простые типы для api; JSON-сообщение очереди →
-простые типы для orchestrator).
+The shared "run this algorithm" business logic — one function per
+algorithm (`run_grover`, `run_sat_grover`, `run_qpe`, `run_vqe_sync`),
+taking plain Python types (lists, strings, numbers), not Pydantic or
+other framework-specific objects. This came about when moving to
+RabbitMQ-based orchestration (see
+`docs/architecture/orchestration.md`) — this logic used to live
+directly in `services/api/app/execution.py` and was tied to the API's
+Pydantic schemas; now both `api` and `orchestrator` use the same code,
+each with its own thin adapter on top (an HTTP request → plain types for
+`api`; a JSON queue message → plain types for `orchestrator`).
 
 ### `quantum_core/tasks.py`
-Формат сообщений очереди — `ExperimentTask` (публикует `api`, читает
-`orchestrator`) и `ExperimentResultMessage` (наоборот). Простые
-`dataclass` с `to_json()`/`from_json()`, без Pydantic — чтобы не тащить
-HTTP-фреймворк в `quantum_core`. Единственный файл в этом проекте, который
-я реально прогнал и проверил (round-trip сериализации, включая
-failure-случай) именно в контексте оркестрации — чистый stdlib, без
-внешних зависимостей.
+The queue message format — `ExperimentTask` (published by `api`, read
+by `orchestrator`) and `ExperimentResultMessage` (the reverse). Plain
+`dataclass`es with `to_json()`/`from_json()`, no Pydantic — so as not to
+drag an HTTP framework into `quantum_core`. The one file in this project
+that was actually run and verified (serialization round-trip, including
+the failure case) specifically in the context of orchestration — pure
+stdlib, no external dependencies.
 
 ### `demo_aer.py`
-Прогоняет Bell-состояние (`H` + `CX` на 2 кубитах) через `AerBackend` и
-`wait_for_result()` — тот же механизм синхронизации, что и в
-`demo_polling.py`, но теперь на настоящей квантовой схеме. Ожидаемый
-результат — гистограмма с примерно равным распределением между `00` и `11`
-(и почти без `01`/`10`, это и есть суть entanglement в Bell-паре).
+Runs a Bell state (`H` + `CX` on 2 qubits) through `AerBackend` and
+`wait_for_result()` — the same synchronization mechanism as in
+`demo_polling.py`, but now on an actual quantum circuit. Expected
+result: a histogram roughly evenly split between `00` and `11` (and
+almost no `01`/`10` — that's the essence of entanglement in a Bell
+pair).
 
 ### `demo_polling.py`
-Исполняемый скрипт, который прогоняет несколько экспериментов параллельно
-через `MockHardwareBackend` и `wait_for_result()`, чтобы вживую увидеть:
-- успешные завершения с гистограммой измерений;
-- retry с exponential backoff при transient-сбоях (видно в логах warning);
-- случаи, когда retry исчерпаны и job считается неудачной.
+An executable script that runs several experiments in parallel through
+`MockHardwareBackend` and `wait_for_result()`, to see live:
+- successful completions with a measurement histogram;
+- retry with exponential backoff on transient failures (visible as
+  warning logs);
+- cases where retries are exhausted and the job is marked failed.
 
-Не является частью библиотеки — чисто демонстрационный / ручного прогона
-скрипт.
+Not part of the library — a purely demonstrative / manual-run script.
 
 ### `pyproject.toml`
-Описание пакета. Содержит `[build-system]` (нужен для `pip install -e .`)
-и `[tool.setuptools] packages = ["quantum_core"]` — явный список вместо
-автообнаружения (`packages.find`), потому что автообнаружение на
-некоторых версиях `setuptools` давало пустой `MAPPING` в editable-finder'е
-и импорт молча ломался — подробный разбор этого бага был в процессе
-отладки установки пакета.
+The package description. Contains `[build-system]` (needed for
+`pip install -e .`) and `[tool.setuptools] packages = ["quantum_core"]`
+— an explicit list instead of auto-discovery (`packages.find`), because
+auto-discovery on some `setuptools` versions produced an empty `MAPPING`
+in the editable-finder and import silently broke — a detailed writeup of
+this bug came up while debugging the package install.
 
-`[project.dependencies]` объявляет `qiskit`/`qiskit-aer`/`scipy` —
-это единственный источник правды для runtime-зависимостей. Это важно не
-только для самого `quantum-core`, но и для зависимых сервисов: когда
-`services/api/requirements.txt` делает `-e ../quantum-core`, pip
-транзитивно ставит и эти три пакета — без объявления их здесь такого не
-происходит (именно так изначально и было, и `api` падал с
-`ModuleNotFoundError: No module named 'qiskit'`, пока это не поправили).
+`[project.dependencies]` declares `qiskit`/`qiskit-aer`/`scipy` — this
+is the single source of truth for runtime dependencies. This matters not
+just for `quantum-core` itself but for the dependent services too: when
+`services/api/requirements.txt` does `-e ../quantum-core`, pip
+transitively installs those three packages too — without declaring them
+here, this doesn't happen (that's exactly what was originally the case,
+and `api` used to crash with `ModuleNotFoundError: No module named
+'qiskit'`, until this was fixed).
 
 ### `requirements.txt`
-Теперь содержит только dev/test-инструменты (`pytest`, `pytest-asyncio`)
-— runtime-зависимости переехали в `pyproject.toml` (см. выше). Для работы
-с `quantum-core` как с самостоятельным проектом нужны оба шага:
-`pip install -e .` (сам пакет + runtime-зависимости из `pyproject.toml`)
-и `pip install -r requirements.txt` (dev-инструменты).
+Now contains only dev/test tools (`pytest`, `pytest-asyncio`) — runtime
+dependencies moved into `pyproject.toml` (see above). Working with
+`quantum-core` as a standalone project requires both steps:
+`pip install -e .` (the package itself + runtime dependencies from
+`pyproject.toml`) and `pip install -r requirements.txt` (dev tools).
 
-## Как запустить
+## How to run it
 
-Требуется Python 3.11+.
+Requires Python 3.11+.
 
-**Без внешних зависимостей** (mock-backend, синхронизация):
+**With no external dependencies** (mock backend, synchronization):
 
 ```bash
 cd services/quantum-core
@@ -309,77 +324,79 @@ pip install -e .
 python3 demo_polling.py
 ```
 
-`pip install -e .` устанавливает пакет `quantum_core` в editable-режиме —
-без этого шага `python3 demo_polling.py` упадёт с
-`ModuleNotFoundError: No module named 'quantum_core'`, так как сам пакет
-не находится через обычный sys.path. Editable-режим означает, что
-изменения в коде подхватываются сразу, без переустановки.
+`pip install -e .` installs the `quantum_core` package in editable mode
+— without this step, `python3 demo_polling.py` fails with
+`ModuleNotFoundError: No module named 'quantum_core'`, since the package
+itself can't be found via the regular sys.path. Editable mode means
+code changes are picked up immediately, no reinstall needed.
 
-Никаких внешних сервисов (БД, брокеры, Docker) не нужно — всё работает
-локально в памяти одного процесса.
+No external services (DB, brokers, Docker) are needed — everything runs
+locally in a single process's memory.
 
-Ожидаемый результат: в stdout — 8 экспериментов, часть завершится успешно
-с гистограммой (`COMPLETED counts=...`), часть — "GAVE UP after retries"
-(если transient-сбои повторились больше `max_retries_on_transient_error`
-раз подряд). В stderr — логи `WARNING` о каждой retry-попытке с указанием
-номера попытки. Это нормально и является ожидаемым поведением, а не
-ошибкой — демонстрирует именно ту деградацию, для которой писалась
-retry/backoff-логика.
+Expected result: stdout shows 8 experiments, some completing
+successfully with a histogram (`COMPLETED counts=...`), some "GAVE UP
+after retries" (if transient failures repeated more than
+`max_retries_on_transient_error` times in a row). stderr shows
+`WARNING` logs for each retry attempt with the attempt number. This is
+normal, expected behavior, not a bug — it demonstrates exactly the
+degradation the retry/backoff logic was written to handle.
 
-**С Qiskit Aer** (реальная симуляция) — используем тот же `.venv`:
+**With Qiskit Aer** (real simulation) — using the same `.venv`:
 
 ```bash
 cd services/quantum-core
-source .venv/bin/activate    # если ещё не активировано
+source .venv/bin/activate    # if not already active
 pip install -r requirements.txt
 python3 demo_aer.py
 ```
 
-Ожидаемый результат: строка вида
+Expected result: a line like
 `status=JobStatus.COMPLETED counts={'00': ~512, '11': ~512} metadata=...`
-(конкретные числа будут отличаться от shot-to-shot, но `01`/`10` должны
-быть близки к нулю — это Bell-пара). **Это первый запуск, который я не
-проверял сам** — если что-то не сойдётся с твоей версией `qiskit-aer`,
-пришли текст ошибки, поправим.
+(the exact numbers will vary shot-to-shot, but `01`/`10` should be close
+to zero — this is a Bell pair). **This is the first run I haven't
+verified myself** — if anything doesn't match with your `qiskit-aer`
+version, send the error text over and we'll fix it.
 
-**Grover** (после установки qiskit из шага выше):
+**Grover** (after installing qiskit from the step above):
 
 ```bash
-python3 demo_grover.py          # "hello world" — ищет '101' по умолчанию
-python3 demo_grover.py 011      # или любое другое значение
-python3 demo_grover.py 011 110  # можно искать сразу несколько отмеченных записей
+python3 demo_grover.py          # "hello world" — looks for '101' by default
+python3 demo_grover.py 011      # or any other value
+python3 demo_grover.py 011 110  # can search for several marked entries at once
 
-python3 demo_sat_grover.py      # настоящий поиск: SAT-критерий, ответ не захардкожен
+python3 demo_sat_grover.py      # a real search: SAT criterion, answer not hardcoded
 ```
 
 **QFT/QPE**:
 
 ```bash
-python3 demo_qpe.py             # φ=5/8, точно представимо -> должен дать '101' почти всегда
-python3 demo_qpe.py --inexact   # φ=0.3, не представимо точно -> размазанный пик, это нормально
+python3 demo_qpe.py             # φ=5/8, exactly representable -> should give '101' almost always
+python3 demo_qpe.py --inexact   # φ=0.3, not exactly representable -> a spread-out peak, that's normal
 ```
 
-**VQE** (займёт заметно больше времени — десятки итераций, до 5 схем каждая):
+**VQE** (takes noticeably longer — dozens of iterations, up to 5
+circuits each):
 
 ```bash
 python3 demo_vqe.py
 ```
 
-## Юнит-тесты
+## Unit tests
 
-`tests/unit/` покрывает `polling.py` (13 тестов: `CircuitBreaker` +
-`wait_for_result` — backoff, retry, таймаут, отмена, жёсткий/transient
-отказ). Подробности подхода к проверке — в `docs/testing.md`.
+`tests/unit/` covers `polling.py` (13 tests: `CircuitBreaker` +
+`wait_for_result` — backoff, retry, timeout, cancellation, hard/transient
+failure). Details on the verification approach are in `docs/testing.md`.
 
 ```bash
 pytest tests/unit/ -v
 ```
 
-⚠️ Логика тестов проверена вручную (см. `docs/testing.md`), но сам pytest
-(обнаружение фикстур, `pytest-asyncio`) — нет, нет сети в моей среде.
-Прогони первым.
+⚠️ The tests' logic has been verified by hand (see `docs/testing.md`),
+but pytest itself (fixture discovery, `pytest-asyncio`) hasn't — no
+network access in my environment. Run it first.
 
-## Пока не реализовано
+## Not yet implemented
 
-- юнит-тесты на остальные модули (`base.py`, `mock_hw_backend.py`,
-  алгоритмы) — сейчас покрыт только `polling.py`, самая критичная часть.
+- Unit tests for the remaining modules (`base.py`, `mock_hw_backend.py`,
+  the algorithms) — only `polling.py`, the most critical part, is
+  currently covered.
