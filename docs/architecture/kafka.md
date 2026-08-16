@@ -207,6 +207,153 @@ faust -A app.faust_app tables    # list tables
 faust -A app.faust_app agents    # list agents
 ```
 
+## Advanced topology: a derived alerts stream
+
+Both `stream-analytics` consumers (hand-rolled and Faust) computed a
+rolling/windowed average and only **logged** it — nothing consumed that
+output. `faust_app.py` now demonstrates a real "source topic → windowed
+aggregate → derived stream" topology: a third table,
+`alert_state` (deliberately **not** windowed — hysteresis state should
+persist indefinitely per backend, unlike the 60-second rolling window),
+tracks per-backend hysteresis via `app/alerting.py`, and every state
+*change* (not every sample) is published to a new topic,
+`calibration-alerts`.
+
+**Why hysteresis, not a flat threshold check**: `consumer.py`'s existing
+`ALERT_THRESHOLD` check flips on every message that crosses it — a
+single noisy sample would flap the alert state on and off. `AlertTracker`
+(and the underlying pure `step()` function) instead requires
+`breach_streak` consecutive samples above the threshold before entering
+ALERT, and `recovery_streak` consecutive samples at/below it before
+clearing — a standard debounce pattern, and specifically the reason this
+is a genuine state machine rather than a stateless per-message check.
+
+`alert_state` being a **Faust `Table`** rather than a plain Python dict
+is deliberate, not incidental: like the windowed tables, it's
+changelog-backed, so a worker restart replays the changelog and resumes
+with the correct streak counters — it doesn't silently forget that a
+backend was, say, 2 out of 3 samples into an alert streak.
+
+### Verification
+
+`app/alerting.py`'s hysteresis logic (`step()` / `AlertTracker`) was
+verified the same way as `RollingErrorRate` — first as a standalone
+script covering 7 scenarios (single breach doesn't trigger; a streak of
+breaches triggers on the last one; continued breaches don't re-trigger;
+a single recovery sample doesn't clear; a breach mid-recovery correctly
+resets the recovery streak; backends are tracked independently;
+exactly-at-threshold is not a breach — the boundary is exclusive), then
+transcribed into `tests/test_alerting.py` in that same verified form.
+The module was refactored once, from three parallel dicts into a single
+immutable `AlertState` + pure `step()` function (so the same logic can
+drive either a plain dict, via `AlertTracker`, or a Faust `Table`
+directly, via `step()`) — all 7 scenarios were re-run against the
+refactored version and matched exactly before it was wired into
+`faust_app.py`.
+
+⚠️ **Not verified**: the actual `faust.Table`/`app.topic().send()`
+wiring in `faust_app.py` against real Kafka/Faust — same caveat as the
+rest of this file (no `faust-streaming`, Kafka, or network access in my
+environment). Run it and check the `calibration-alerts` topic directly:
+
+```bash
+docker exec -it quantum-platform-kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 --topic calibration-alerts --from-beginning
+```
+
+**Update, confirmed on first real run**: the windowed-average logic
+(`error_rate_sum`/`sample_count` tables, `group_by`, the changelog
+mechanism) ran correctly end to end against real Kafka — the very first
+`[faust] backend=... window_avg(...)=...` log line came out exactly as
+expected. Immediately after, the worker crashed with
+`PartitionsMismatch` on the two newest tables
+(`baseline_stats`, `drift_alert_state`, added for the drift-detection
+work below) — a **topic-metadata propagation race**, not a logic bug:
+those two changelog topics were created only ~100ms before the consumer
+group's metadata fetch, on a single-broker KRaft setup that hadn't yet
+propagated them internally, so Faust briefly saw them as "0 partitions"
+and the first write to `baseline_stats` tripped the mismatch check.
+Restarting the worker (the topics genuinely exist by then) resolves it.
+If it recurs consistently rather than just on a topic's very first
+creation, pre-create the changelog topics manually with the matching
+partition count before starting Faust:
+
+```bash
+docker exec -it quantum-platform-kafka kafka-topics --create \
+  --topic stream-analytics-faust-baseline_stats-changelog \
+  --partitions 8 --replication-factor 1 --bootstrap-server localhost:9092
+docker exec -it quantum-platform-kafka kafka-topics --create \
+  --topic stream-analytics-faust-drift_alert_state-changelog \
+  --partitions 8 --replication-factor 1 --bootstrap-server localhost:9092
+```
+
+Given `AerBackend` is noiseless (`error_rate` stays ~0), you shouldn't
+expect to see anything on `calibration-alerts` under normal operation —
+that's expected, not a sign of something broken; the state machine
+itself is what's been verified, not "real" drift, which doesn't exist
+yet without a noise model. To see a transition fire for real, the
+easiest path is a temporary manual test: drive `step()`/`AlertTracker`
+directly with synthetic values above `DEFAULT_THRESHOLD` (as the tests
+already do), rather than trying to provoke a real breach out of a
+noiseless simulator.
+
+## Advanced topology: statistical drift detection
+
+A second, independent derived stream, answering a different question
+than the flat-threshold alert above: not "is `error_rate` above 0.05"
+but "is this backend behaving differently from its own history" — the
+actual definition of drift.
+
+`app/drift.py` maintains an all-time running mean/stddev of
+`error_rate` per backend via **Welford's online algorithm** (Welford
+1962), rather than the naive "keep a growing list, call
+`statistics.stdev()`" approach — Welford's algorithm is O(1) per sample
+in both time and memory, which matters here because this baseline is
+meant to accumulate over a backend's *entire* history, not a bounded
+recent window like the tumbling tables. Every raw sample's z-score
+against that baseline (computed against the baseline **before** folding
+the new sample in — scoring against a baseline that already includes
+the point itself would damp a true outlier's own z-score, especially
+early on when there's little history yet) is checked through the same
+hysteresis machinery from the alerting section above
+(`app.alerting.step()`, reused generically — it doesn't care whether the
+"value" it's watching is a raw error rate or a z-score), via a second,
+separate state table (`drift_alert_state`) and a second derived topic,
+`calibration-drift-alerts`.
+
+Two entirely separate state tables (`alert_state` for the flat
+threshold, `drift_alert_state` for z-score drift) rather than combining
+them — they answer genuinely different questions and evolve
+independently: a backend can drift meaningfully from its own baseline
+while still sitting under the flat 0.05 threshold, or the reverse.
+
+### Verification
+
+`app/drift.py`'s Welford implementation was checked directly against
+Python's `statistics.mean`/`statistics.stdev` on an 80-sample random
+series — matched to 1e-9 (this is the same kind of independent-of-Kafka
+verification used for `RollingErrorRate` and `AlertTracker`). Also
+verified: a genuine outlier (0.10) against a tight synthetic baseline
+(~0.02 ± 0.001) scores a z-score in the hundreds, comfortably above the
+default threshold of 3.0; a value close to the mean scores well under
+1.0; and — a case worth calling out specifically — a **constant-input
+baseline has zero variance, and `zscore()` returns `None` rather than
+an infinite or undefined number in that case**, which is exactly what
+`AerBackend`'s currently-noiseless `error_rate` looks like (see
+`calibration.py`'s "Honest limitation") — so on the current stack, no
+drift alert will fire, which is correct behavior given the input, not a
+sign the feature is broken. All 6 scenarios were transcribed into
+`tests/test_drift.py` in their verified form.
+
+⚠️ **Not verified**: the Faust `Table`/topic wiring in `faust_app.py`
+against real Kafka/Faust — same caveat as everywhere else in this
+document. Check the topic the same way as `calibration-alerts`:
+
+```bash
+docker exec -it quantum-platform-kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 --topic calibration-drift-alerts --from-beginning
+```
+
 ## How to run it
 
 Already wired into `./dev.sh` — it brings up Kafka and TimescaleDB
@@ -244,10 +391,17 @@ docker exec -it quantum-platform-timescaledb psql -U quantum -d telemetry \
 
 ## Not yet implemented
 
-- `ALERT_THRESHOLD = 0.05` in `stream-analytics/app/consumer.py` is
-  essentially a placeholder: without a noise model on `AerBackend` there
-  is no real `error_rate` distribution to calibrate the threshold
-  against;
+- `ALERT_THRESHOLD = 0.05` in `stream-analytics/app/consumer.py`, and
+  `DRIFT_ZSCORE_THRESHOLD`/`DEFAULT_THRESHOLD` in the Faust app, are
+  essentially placeholders: without a noise model on `AerBackend` there
+  is no real `error_rate` distribution to calibrate any of them
+  against — every threshold here is a reasonable-looking guess, not a
+  tuned value;
+- Nothing yet consumes `calibration-alerts` or `calibration-drift-alerts`
+  besides the manual `kafka-console-consumer` check above — no
+  notification channel (Slack, email, PagerDuty) is wired up, and
+  nothing writes these alert events to TimescaleDB the way raw
+  calibration events are;
 - Multiple consumers within the same consumer group
   (`stream-analytics`) for horizontal scaling — not needed yet at the
   current volume;
