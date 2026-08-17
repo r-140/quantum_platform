@@ -29,7 +29,7 @@ streamed to the terminal via `tail -f`. `Ctrl+C` stops `api`/`orchestrator`/
 | API — Swagger | http://localhost:8000/docs | interactive REST API docs |
 | **Experiments dashboard** | http://localhost:8000/dashboard/ | live table, filters, drill-down into results |
 | RabbitMQ | http://localhost:15672 (guest/guest) | task queue management UI |
-| **Grafana** | http://localhost:3000 (admin/admin) | metrics (Prometheus) + direct SQL queries against the DBs |
+| **Grafana** | http://localhost:3001 (admin/admin) | metrics (Prometheus) + direct SQL queries against the DBs |
 | Prometheus | http://localhost:9090 | raw metrics/targets |
 | **Kafka UI (Kafbat)** | http://localhost:8090 | browse topics/messages/consumer groups |
 | **Adminer** | http://localhost:8091 | ad-hoc SQL browser |

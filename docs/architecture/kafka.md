@@ -287,6 +287,33 @@ docker exec -it quantum-platform-kafka kafka-topics --create \
   --partitions 8 --replication-factor 1 --bootstrap-server localhost:9092
 ```
 
+**Second real finding, confirmed via `/api/state`** (see
+`docs/architecture/stream-analytics-dashboard.md`): after the
+`PartitionsMismatch` crash above and the subsequent restart,
+`alert_state`'s streak counter and `baseline_stats`'s sample count ended
+up **off by exactly one** for the same backend (98 vs. 97). Root cause:
+the crash happened *after* the alert-hysteresis table write for that
+message already succeeded, but *before* the baseline-stats write for the
+same message. Faust redelivered the message on restart, and this time
+both writes succeeded — so that one message incremented `alert_state`'s
+counter twice but `baseline_stats`'s counter only once.
+
+This is a direct consequence of Faust's **default "at-least-once"
+processing guarantee**: multiple table writes inside one agent
+iteration are not atomic with each other, nor with the consumer offset
+commit. A partial crash followed by redelivery can apply some of a
+message's side effects twice while applying others once. It does **not**
+make either table's own hysteresis logic incorrect in isolation — each
+table's streak/state machine is still internally consistent on its own
+terms — it just means the two tables' counters can drift apart from
+each other by a small amount after a crash-and-recover event, which is
+a cosmetic/informational discrepancy on this dashboard, not a threshold
+or drift-detection correctness bug. A real fix would mean enabling
+Faust's exactly-once processing guarantee (transactional producer +
+broker support) — not done here, given the added setup/performance cost
+for what's a demo-scale project; documenting the behavior honestly was
+judged the better trade-off for now.
+
 Given `AerBackend` is noiseless (`error_rate` stays ~0), you shouldn't
 expect to see anything on `calibration-alerts` under normal operation —
 that's expected, not a sign of something broken; the state machine
@@ -398,10 +425,10 @@ docker exec -it quantum-platform-timescaledb psql -U quantum -d telemetry \
   against — every threshold here is a reasonable-looking guess, not a
   tuned value;
 - Nothing yet consumes `calibration-alerts` or `calibration-drift-alerts`
-  besides the manual `kafka-console-consumer` check above — no
-  notification channel (Slack, email, PagerDuty) is wired up, and
-  nothing writes these alert events to TimescaleDB the way raw
-  calibration events are;
+  as a notification channel (Slack, email, PagerDuty) — a live status
+  view now exists (`docs/architecture/stream-analytics-dashboard.md`),
+  but nothing pages anyone; and nothing writes these alert events to
+  TimescaleDB the way raw calibration events are;
 - Multiple consumers within the same consumer group
   (`stream-analytics`) for horizontal scaling — not needed yet at the
   current volume;

@@ -177,7 +177,12 @@ services:
     image: grafana/grafana:latest
     container_name: quantum-platform-grafana
     ports:
-      - "3000:3000"
+      # Host port deliberately NOT 3000 -- that's Grafana's near-universal
+      # default across other projects' own docker-compose setups too, and
+      # is the single most likely port collision on a dev machine running
+      # more than one Grafana-based stack. Container-internal port stays
+      # 3000 (Grafana's own default); only the host-side mapping changed.
+      - "3001:3000"
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin

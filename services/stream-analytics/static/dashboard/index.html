@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>stream-analytics · calibration telemetry</title>
+
+<!--
+  Real React, no build step: loaded via CDN (production UMD builds) with
+  Babel Standalone doing the in-browser JSX transform. This keeps the
+  same "no npm, no build step" property as the experiments dashboard
+  (services/api/static/dashboard/index.html) while still being genuine
+  composable React -- new per-metric widgets can be added as new
+  components as this project's Faust analytics grow, rather than
+  growing one more hand-rolled vanilla-JS file.
+
+  Known trade-off, stated honestly: this requires network access to
+  unpkg.com at page-load time. A fully offline-capable version would
+  need a real bundled build (Vite, etc.) -- deliberately not done here,
+  to stay consistent with the rest of this project's "no build step"
+  choice for internal tooling. Worth revisiting if this page needs to
+  work in a network-isolated environment.
+
+  Same visual token system as services/api/static/dashboard/index.html
+  (the experiments dashboard) -- this is the same product's telemetry
+  page, not a separate brief, so it deliberately does not invent a new
+  identity.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+
+<style>
+  :root {
+    --bg: #0B0E14;
+    --panel: #12161F;
+    --panel-raised: #161B26;
+    --border: #232939;
+    --text: #E4E7EC;
+    --text-dim: #7B8494;
+    --accent: #4FD1E8;
+    --ok: #4FE8A0;
+    --alert: #E85F5F;
+    --warn: #E8B44F;
+    --font-display: 'Space Grotesk', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-display);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent); }
+
+  #root { min-height: 100vh; }
+
+  .shell {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 28px 24px 64px;
+  }
+
+  header.top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 28px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  header.top h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: 0.01em;
+  }
+
+  header.top .subtitle {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .conn-badge {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .conn-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-dim);
+  }
+  .conn-dot.live { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .conn-dot.down { background: var(--alert); box-shadow: 0 0 6px var(--alert); }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  @media (min-width: 900px) {
+    .layout { grid-template-columns: 1.4fr 1fr; align-items: start; }
+  }
+
+  section.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+  }
+
+  section.panel > h2 {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin: 0 0 14px;
+  }
+
+  .backend-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 14px;
+  }
+
+  .empty-state {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text-dim);
+    padding: 24px 4px;
+    line-height: 1.6;
+  }
+
+  .backend-card {
+    background: var(--panel-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    position: relative;
+  }
+
+  .backend-card .name-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .pulse {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+    position: relative;
+  }
+  .pulse::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    border: 1px solid var(--ok);
+    animation: pulse-ring 2s ease-out infinite;
+  }
+  .pulse.alert { background: var(--alert); }
+  .pulse.alert::after { border-color: var(--alert); }
+
+  @keyframes pulse-ring {
+    0% { transform: scale(0.6); opacity: 0.8; }
+    100% { transform: scale(1.8); opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse::after { animation: none; display: none; }
+  }
+
+  .backend-name {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .badge-row { display: flex; gap: 6px; margin-bottom: 12px; }
+
+  .badge {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+  .badge.alert { color: var(--alert); border-color: color-mix(in srgb, var(--alert) 40%, var(--border)); }
+
+  .metric-row {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 4px 0;
+    color: var(--text-dim);
+  }
+  .metric-row .val { color: var(--text); }
+
+  .streak-hint {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-top: 8px;
+    opacity: 0.75;
+  }
+
+  .feed {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 520px;
+    overflow-y: auto;
+  }
+
+  .feed-item {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    border-left: 2px solid var(--border);
+    padding: 6px 0 6px 10px;
+    line-height: 1.5;
+  }
+  .feed-item.alert { border-left-color: var(--alert); }
+  .feed-item.drift { border-left-color: var(--warn); }
+  .feed-item .fi-head {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+  }
+  .feed-item .fi-kind {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+  .feed-item .fi-time {
+    margin-left: auto;
+    color: var(--text-dim);
+    font-size: 10px;
+  }
+  .feed-item .fi-level.ok { color: var(--ok); }
+  .feed-item .fi-level.alert { color: var(--alert); }
+  .feed-item .fi-detail { color: var(--text-dim); margin-top: 2px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+const POLL_INTERVAL_MS = 3000;
+
+function formatFloat(n, digits = 4) {
+  if (n === null || n === undefined) return "—";
+  return Number(n).toFixed(digits);
+}
+
+function formatRelativeTime(isoString) {
+  const then = new Date(isoString).getTime();
+  const diffS = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (diffS < 5) return "just now";
+  if (diffS < 60) return `${diffS}s ago`;
+  const diffM = Math.round(diffS / 60);
+  if (diffM < 60) return `${diffM}m ago`;
+  const diffH = Math.round(diffM / 60);
+  return `${diffH}h ago`;
+}
+
+function ConnBadge({ status }) {
+  const label = status === "live" ? "connected" : status === "down" ? "unreachable" : "connecting";
+  return (
+    <span className="conn-badge">
+      <span className={`conn-dot ${status}`}></span>
+      {label}
+    </span>
+  );
+}
+
+function BackendCard({ backend }) {
+  const isAlerting = backend.alert_level === "alert" || backend.drift_level === "alert";
+  return (
+    <div className="backend-card">
+      <div className="name-row">
+        <span className={`pulse ${isAlerting ? "alert" : ""}`}></span>
+        <span className="backend-name">{backend.backend_name}</span>
+      </div>
+
+      <div className="badge-row">
+        <span className={`badge ${backend.alert_level === "alert" ? "alert" : "ok"}`}>
+          threshold: {backend.alert_level}
+        </span>
+        <span className={`badge ${backend.drift_level === "alert" ? "alert" : "ok"}`}>
+          drift: {backend.drift_level}
+        </span>
+      </div>
+
+      <div className="metric-row">
+        <span>window avg (60s)</span>
+        <span className="val">{formatFloat(backend.window_avg)}</span>
+      </div>
+      <div className="metric-row">
+        <span>window samples</span>
+        <span className="val">{backend.window_sample_count}</span>
+      </div>
+      <div className="metric-row">
+        <span>baseline mean ± σ</span>
+        <span className="val">
+          {formatFloat(backend.baseline_mean)} ± {formatFloat(backend.baseline_stddev)}
+        </span>
+      </div>
+      <div className="metric-row">
+        <span>baseline samples</span>
+        <span className="val">{backend.baseline_count}</span>
+      </div>
+
+      <div className="streak-hint">
+        threshold streak: {backend.alert_consecutive_breaches} breach / {backend.alert_consecutive_ok} ok
+        &nbsp;·&nbsp; drift streak: {backend.drift_consecutive_breaches} breach / {backend.drift_consecutive_ok} ok
+      </div>
+    </div>
+  );
+}
+
+function FeedItem({ event }) {
+  return (
+    <div className={`feed-item ${event.kind}`}>
+      <div className="fi-head">
+        <span className="fi-kind">{event.kind}</span>
+        <span className={`fi-level ${event.level}`}>{event.backend_name} → {event.level}</span>
+        <span className="fi-time">{formatRelativeTime(event.timestamp)}</span>
+      </div>
+      <div className="fi-detail">
+        {event.kind === "alert" && (
+          <span>window_avg={formatFloat(event.window_avg)} threshold={formatFloat(event.threshold)}</span>
+        )}
+        {event.kind === "drift" && (
+          <span>
+            z={formatFloat(event.zscore, 2)} error_rate={formatFloat(event.error_rate)}
+            {" "}baseline={formatFloat(event.baseline_mean)}±{formatFloat(event.baseline_stddev)}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [state, setState] = useState({ backends: [], recent_events: [] });
+  const [connStatus, setConnStatus] = useState("connecting");
+  const pollRef = useRef(null);
+
+  async function poll() {
+    try {
+      const res = await fetch("/api/state");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setState(data);
+      setConnStatus("live");
+    } catch (err) {
+      setConnStatus("down");
+    }
+  }
+
+  useEffect(() => {
+    poll();
+    pollRef.current = setInterval(poll, POLL_INTERVAL_MS);
+    return () => clearInterval(pollRef.current);
+  }, []);
+
+  return (
+    <div className="shell">
+      <header className="top">
+        <div>
+          <h1>stream-analytics</h1>
+          <div className="subtitle">calibration telemetry · alert &amp; drift state · polling every {POLL_INTERVAL_MS / 1000}s</div>
+        </div>
+        <ConnBadge status={connStatus} />
+      </header>
+
+      <div className="layout">
+        <section className="panel">
+          <h2>Backends</h2>
+          {state.backends.length === 0 ? (
+            <div className="empty-state">
+              No backends seen yet. This fills in once orchestrator's calibration
+              cycle publishes at least one event (every 5 minutes by default,
+              CALIBRATION_INTERVAL_S) and this worker's agent processes it.
+            </div>
+          ) : (
+            <div className="backend-grid">
+              {state.backends.map((b) => (
+                <BackendCard key={b.backend_name} backend={b} />
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="panel">
+          <h2>Recent transitions</h2>
+          {state.recent_events.length === 0 ? (
+            <div className="empty-state">
+              No alert or drift transitions yet. Expected on AerBackend's
+              noiseless error_rate — this feed only fires on a hysteresis
+              boundary crossing, not on every sample.
+            </div>
+          ) : (
+            <div className="feed">
+              {state.recent_events.map((e, i) => (
+                <FeedItem key={`${e.timestamp}-${i}`} event={e} />
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

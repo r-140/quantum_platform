@@ -16,7 +16,7 @@ own role:
 | Tool | Role | Port |
 |---|---|---|
 | **Prometheus** | Time-series metrics store, HTTP scrape | 9090 |
-| **Grafana** | Metrics visualization + direct SQL queries against Postgres/TimescaleDB | 3000 |
+| **Grafana** | Metrics visualization + direct SQL queries against Postgres/TimescaleDB | 3001 (deliberately not the common default 3000, to avoid colliding with other projects' own Grafana — see `docker-compose.yml`) |
 | **Kafbat UI** | Browse Kafka topics/messages/consumer groups | 8090 |
 | **Adminer** | Ad-hoc SQL browser for Postgres/TimescaleDB | 8091 |
 

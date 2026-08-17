@@ -58,13 +58,30 @@ different question than the flat threshold does: not "is error_rate
 above 0.05" but "is this backend behaving differently from its own
 history" -- the literal definition of drift, and the reason this exists
 alongside, not instead of, the flat-threshold alerting above.
+
+Dashboard
+---------
+`GET /api/state` (JSON snapshot: per-backend window_avg, alert/drift
+levels and streak counters, baseline mean/stddev, plus a recent-events
+feed) and `GET /dashboard/` (a React UI consuming it) are served from
+this same Faust worker's already-running built-in web server (the one
+bound to port 6066 by default) -- same-origin, no CORS, no second
+service. The frontend is plain React loaded via CDN with in-browser
+Babel for JSX, not a bundled/Vite build -- deliberately, to keep the
+"no npm, no build step" property the experiments dashboard has (see
+docs/architecture/dashboard.md), while still being genuine composable
+React rather than one more hand-rolled vanilla-JS file, specifically so
+new per-metric widgets can be added as new components as this project's
+Faust analytics grow. See static/dashboard/index.html.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from datetime import timedelta
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import faust
 
@@ -84,6 +101,29 @@ KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9
 CALIBRATION_TOPIC = "calibration-results"
 ALERTS_TOPIC = "calibration-alerts"
 DRIFT_ALERTS_TOPIC = "calibration-drift-alerts"
+
+# In-memory only (not changelog-backed like the Tables below) -- this is
+# purely a "what just happened" feed for the dashboard, not a source of
+# truth for anything the alerting/drift logic depends on. Losing it on
+# restart is fine; the actual hysteresis state (alert_state,
+# drift_alert_state) is unaffected, since it lives in real Faust Tables.
+RECENT_EVENTS_MAXLEN = 50
+recent_events: deque[dict] = deque(maxlen=RECENT_EVENTS_MAXLEN)
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+DASHBOARD_HTML_PATH = STATIC_DIR / "dashboard" / "index.html"
+
+
+def _record_event(kind: str, backend_name: str, level: str, **extra: float) -> None:
+    recent_events.appendleft(
+        {
+            "kind": kind,  # "alert" or "drift"
+            "backend_name": backend_name,
+            "level": level,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **extra,
+        }
+    )
 
 # Z-score hysteresis is deliberately separate from the flat-threshold
 # alerting in alerting.py -- a z-score of 3+ is already a fairly strong
@@ -298,6 +338,13 @@ async def process_calibration_event(stream):
                 transition.value,
                 transition.threshold,
             )
+            _record_event(
+                "alert",
+                transition.backend_name,
+                transition.level.value,
+                window_avg=transition.value,
+                threshold=transition.threshold,
+            )
             await alerts_topic.send(
                 key=event.backend_name,
                 value=AlertEvent(
@@ -358,6 +405,15 @@ async def process_calibration_event(stream):
                     new_welford.mean,
                     new_welford.stddev,
                 )
+                _record_event(
+                    "drift",
+                    drift_transition.backend_name,
+                    drift_transition.level.value,
+                    zscore=z,
+                    error_rate=event.error_rate,
+                    baseline_mean=new_welford.mean,
+                    baseline_stddev=new_welford.stddev,
+                )
                 await drift_alerts_topic.send(
                     key=event.backend_name,
                     value=DriftAlertEvent(
@@ -369,6 +425,74 @@ async def process_calibration_event(stream):
                         baseline_stddev=new_welford.stddev,
                     ),
                 )
+
+
+@app.page("/api/state")
+async def get_state(self, request):
+    """Snapshot of current per-backend state, for the dashboard's poll
+    loop -- reads directly from the live Tables (alert_state,
+    drift_alert_state, baseline_stats) plus the two windowed tables for
+    the current window_avg, rather than keeping a separate cached copy.
+    `alert_state` is used as the backend registry (every backend that's
+    ever produced a calibration event has an entry there, written
+    unconditionally on every event) -- there's no dedicated "list of
+    known backends" anywhere else.
+
+    ⚠️ Unverified against real Faust: `Table.items()` iterating a
+    non-windowed table's current key/value pairs is a standard,
+    documented Faust pattern (used in Faust's own tutorial, e.g. a word
+    count table view) but hasn't been run in this project -- no Faust
+    install in my environment. If this route 404s or returns empty
+    despite the worker log showing processed events, this is the first
+    place to look.
+    """
+    backends = []
+    for backend_name, alert_record in alert_state.items():
+        welford_record = baseline_stats[backend_name]
+        drift_record = drift_alert_state[backend_name]
+        count = sample_count[backend_name].now()
+        total = error_rate_sum[backend_name].now()
+        window_avg = total / count if count else 0.0
+        baseline = WelfordStats(
+            count=welford_record.count, mean=welford_record.mean, m2=welford_record.m2
+        )
+        backends.append(
+            {
+                "backend_name": backend_name,
+                "window_avg": window_avg,
+                "window_sample_count": count,
+                "alert_level": alert_record.level,
+                "alert_consecutive_breaches": alert_record.consecutive_breaches,
+                "alert_consecutive_ok": alert_record.consecutive_ok,
+                "baseline_mean": baseline.mean,
+                "baseline_stddev": baseline.stddev,
+                "baseline_count": baseline.count,
+                "drift_level": drift_record.level,
+                "drift_consecutive_breaches": drift_record.consecutive_breaches,
+                "drift_consecutive_ok": drift_record.consecutive_ok,
+            }
+        )
+
+    return self.json(
+        {
+            "backends": backends,
+            "recent_events": list(recent_events),
+            "alert_threshold": DEFAULT_THRESHOLD,
+            "drift_zscore_threshold": DRIFT_ZSCORE_THRESHOLD,
+        }
+    )
+
+
+@app.page("/dashboard/")
+async def get_dashboard(self, request):
+    """Serves the React (CDN + in-browser Babel, no build step -- see
+    static/dashboard/index.html for the rationale) dashboard, same-origin
+    with /api/state so no CORS setup is needed -- mirroring why the
+    experiments dashboard is served from `api` itself rather than a
+    separate frontend host (see docs/architecture/dashboard.md).
+    """
+    html = DASHBOARD_HTML_PATH.read_text(encoding="utf-8")
+    return self.text(html, content_type="text/html")
 
 
 if __name__ == "__main__":

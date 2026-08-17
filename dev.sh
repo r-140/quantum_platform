@@ -18,9 +18,31 @@
 #                      other services here, not given its own venv setup
 #                      step (see run_tests_if_present below).
 #
+# Flags:
+#   --clean  -- runs `docker compose down -v` for THIS project's own
+#               containers/volumes before starting, wiping Postgres/
+#               TimescaleDB/Grafana/RabbitMQ data and starting from a
+#               clean slate. Deliberately opt-in, not the default --
+#               running this on every normal start would silently erase
+#               your persisted data every time. NOTE what this does NOT
+#               fix: it only tears down containers under this project's
+#               own compose project name (container names here are
+#               already prefixed `quantum-platform-*` specifically to
+#               avoid colliding with other projects) -- it cannot stop
+#               or free a port held by a *different*, unrelated
+#               project's own container (e.g. another project's Grafana
+#               on its own default host port). If you're hitting that
+#               kind of conflict, stop the other project's container
+#               directly, or change this project's host port mapping in
+#               docker-compose.yml. (Grafana here is deliberately on
+#               host port 3001, not the common default 3000, for
+#               exactly this reason -- see docker-compose.yml.)
+#
 # Run from the repo root:
 #   ./dev.sh
 #   ./dev.sh --profile=verify
+#   ./dev.sh --clean
+#   ./dev.sh --clean --profile=verify
 #
 # Logs for api/orchestrator/stream-analytics are written to .dev-logs/
 # (gitignored) and tailed live in this terminal.
@@ -39,10 +61,12 @@ mkdir -p "$LOG_DIR"
 export DATABASE_URL="postgresql+asyncpg://quantum:quantum@localhost:5432/quantum_platform"
 
 PROFILE="quick"
+CLEAN="false"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --profile=*) PROFILE="${1#*=}"; shift ;;
         --profile) PROFILE="${2:-}"; shift 2 ;;
+        --clean) CLEAN="true"; shift ;;
         -h|--help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//'
             exit 0
@@ -73,6 +97,12 @@ cleanup() {
     echo "==> Stopped. RabbitMQ/Postgres/Kafka/TimescaleDB containers are still running -- 'docker compose down' to stop them too."
 }
 trap cleanup EXIT INT TERM
+
+if [[ "$CLEAN" == "true" ]]; then
+    echo "==> --clean: tearing down this project's own containers and volumes (docker compose down -v)..."
+    echo "    (this only affects quantum-platform-* containers/volumes -- see --help for what it does NOT fix)"
+    docker compose -f "$ROOT_DIR/docker-compose.yml" down -v
+fi
 
 echo "==> Starting RabbitMQ + Postgres + Kafka + TimescaleDB (docker compose)..."
 docker compose -f "$ROOT_DIR/docker-compose.yml" up -d
@@ -203,7 +233,7 @@ echo "  TimescaleDB:       localhost:5433 (quantum/quantum, db=telemetry)"
 echo "  Logs:              $LOG_DIR/"
 echo ""
 echo "  Debug/ops stack (see docs/architecture/observability.md):"
-echo "  Grafana:           http://localhost:3000 (admin/admin)"
+echo "  Grafana:           http://localhost:3001 (admin/admin)"
 echo "  Prometheus:        http://localhost:9090"
 echo "  Kafka UI (Kafbat): http://localhost:8090"
 echo "  Adminer (SQL):     http://localhost:8091"
