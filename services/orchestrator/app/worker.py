@@ -84,6 +84,7 @@ async def handle_message(
     message: AbstractIncomingMessage,
     backend: QuantumBackend,
     channel: aio_pika.abc.AbstractChannel,
+    kafka_producer: AIOKafkaProducer,
 ) -> None:
     try:
         task = ExperimentTask.from_json(message.body.decode())
@@ -96,7 +97,7 @@ async def handle_message(
     logger.info("processing experiment_id=%s algorithm=%s", task.experiment_id, task.algorithm)
 
     try:
-        result = await execute_task(backend, task)
+        result = await execute_task(backend, task, kafka_producer=kafka_producer)
         result_message = ExperimentResultMessage(
             experiment_id=task.experiment_id, status="completed", result=result
         )
@@ -161,7 +162,7 @@ async def main() -> None:
                         await message.ack()
                         continue
 
-                    await handle_message(message, backend, channel)
+                    await handle_message(message, backend, channel, kafka_producer)
         finally:
             calibration_task.cancel()
             try:

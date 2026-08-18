@@ -16,6 +16,7 @@ here, repack the result.
 from __future__ import annotations
 
 import math
+from dataclasses import asdict
 
 from quantum_core.algorithms.grover import GroverProblem, build_grover_circuit, optimal_iterations
 from quantum_core.algorithms.qpe import build_qpe_circuit
@@ -113,6 +114,15 @@ def run_vqe_sync(backend: QuantumBackend, shots: int = 8192, max_iterations: int
     plain worker thread/process (like the orchestrator, depending on its
     consumer library) may be able to call it directly -- see each caller
     for specifics.
+
+    `history` (one entry per COBYLA iteration -- params, energy, and the
+    hw/sw-loop instrumentation from vqe_loop.VQEIterationLog) is included
+    in the returned dict, not just the final summary fields -- both so it
+    lands in the stored ExperimentResponse/Postgres JSONB result (a modest
+    size increase, ~100 bytes/iteration), and so orchestrator can publish
+    it to Kafka for the VQE metrics pipeline (see
+    services/orchestrator/app/tasks/vqe_metrics.py and
+    docs/tech-debt.md's "VQE metrics for the hw/sw interaction loop" item).
     """
     result = run_vqe(backend, shots=shots, max_iterations=max_iterations)
     return {
@@ -121,4 +131,5 @@ def run_vqe_sync(backend: QuantumBackend, shots: int = 8192, max_iterations: int
         "nuclear_repulsion": H2_NUCLEAR_REPULSION,
         "total_energy": result.total_energy,
         "iterations_run": len(result.history),
+        "history": [asdict(log) for log in result.history],
     }

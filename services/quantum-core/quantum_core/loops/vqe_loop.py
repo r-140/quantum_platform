@@ -35,6 +35,7 @@ which matters when each evaluation is a real hw/sw round trip.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 
 from scipy.optimize import minimize
@@ -46,13 +47,36 @@ from quantum_core.algorithms.vqe import (
     pauli_expectation_from_counts,
 )
 from quantum_core.backends.base import Circuit, QuantumBackend
-from quantum_core.sync.polling import PollingConfig, wait_for_result
+from quantum_core.sync.polling import PollingConfig, PollingMetrics, wait_for_result
+
+
+@dataclass
+class VQEIterationMetrics:
+    """Aggregated hw/sw-loop instrumentation for one `evaluate_energy()`
+    call -- i.e. one COBYLA iteration's worth of circuit submissions.
+    Populated by summing a fresh `PollingMetrics` per Hamiltonian term
+    (see `evaluate_energy` below). Deliberately just a plain dataclass,
+    not published anywhere by quantum_core itself -- this library stays
+    framework/broker-agnostic (same principle as `execution.py`/
+    `tasks.py`); orchestrator reads the equivalent fields off
+    `VQEIterationLog` after the fact and does the actual Kafka
+    publishing (see services/orchestrator/app/tasks/vqe_metrics.py).
+    """
+
+    quantum_time_s: float = 0.0
+    retry_count: int = 0
+    circuit_breaker_trips: int = 0
 
 
 @dataclass
 class VQEIterationLog:
+    iteration: int
     params: list[float]
     energy: float
+    quantum_time_s: float = 0.0
+    classical_time_s: float = 0.0
+    retry_count: int = 0
+    circuit_breaker_trips: int = 0
 
 
 @dataclass
@@ -69,6 +93,7 @@ async def evaluate_energy(
     *,
     shots: int = 8192,
     polling_config: PollingConfig | None = None,
+    metrics: VQEIterationMetrics | None = None,
 ) -> float:
     """One classical-quantum round trip: submits one circuit per
     non-identity Hamiltonian term, waits for each via the standard hw/sw
@@ -82,6 +107,13 @@ async def evaluate_energy(
     cycle, so concurrent submission wouldn't necessarily be faster and
     would complicate reasoning about the circuit breaker. Revisit this if a
     real backend's constraints turn out to say otherwise.
+
+    If `metrics` is provided, a fresh `PollingMetrics` is passed into
+    `wait_for_result` for each term and folded into `metrics` -- this is
+    the only reason `metrics` exists as a separate parameter rather than
+    just being computed by the caller from timing `evaluate_energy` as a
+    whole: per-term retry/circuit-breaker counts aren't otherwise visible
+    from outside `wait_for_result` at all.
     """
     total = 0.0
     for term in H2_HAMILTONIAN:
@@ -97,7 +129,18 @@ async def evaluate_energy(
             shots=shots,
         )
         handle = await backend.submit(circuit)
-        result = await wait_for_result(backend, handle, config=polling_config or PollingConfig())
+
+        term_metrics = PollingMetrics() if metrics is not None else None
+        result = await wait_for_result(
+            backend, handle, config=polling_config or PollingConfig(), metrics=term_metrics
+        )
+
+        if metrics is not None and term_metrics is not None:
+            metrics.quantum_time_s += term_metrics.wait_time_s
+            metrics.retry_count += term_metrics.transient_retries
+            if term_metrics.circuit_breaker_was_open:
+                metrics.circuit_breaker_trips += 1
+
         assert result.counts is not None
         expectation = pauli_expectation_from_counts(result.counts, term)
         total += term.coefficient * expectation
@@ -118,10 +161,39 @@ def run_vqe(
     """
     params0 = initial_params or [0.0, 0.0, 0.0, 0.0]
     history: list[VQEIterationLog] = []
+    iteration_counter = 0
 
     def cost(params: list[float]) -> float:
-        energy = asyncio.run(evaluate_energy(backend, list(params), shots=shots))
-        history.append(VQEIterationLog(params=list(params), energy=energy))
+        nonlocal iteration_counter
+        iteration_counter += 1
+
+        iter_start = time.monotonic()
+        iter_metrics = VQEIterationMetrics()
+        energy = asyncio.run(
+            evaluate_energy(backend, list(params), shots=shots, metrics=iter_metrics)
+        )
+        iter_wall_time_s = time.monotonic() - iter_start
+
+        # "Classical time" here is total iteration wall time minus time
+        # actually spent waiting on the backend -- an approximation, not
+        # an isolated measurement of COBYLA's own CPU time (that would
+        # need instrumenting scipy.optimize internals, out of scope).
+        # Reasonable given this iteration's other overhead (asyncio.run()
+        # setup/teardown, this function itself) is negligible next to real
+        # quantum wait time on anything but a trivially fast backend.
+        classical_time_s = max(0.0, iter_wall_time_s - iter_metrics.quantum_time_s)
+
+        history.append(
+            VQEIterationLog(
+                iteration=iteration_counter,
+                params=list(params),
+                energy=energy,
+                quantum_time_s=iter_metrics.quantum_time_s,
+                classical_time_s=classical_time_s,
+                retry_count=iter_metrics.retry_count,
+                circuit_breaker_trips=iter_metrics.circuit_breaker_trips,
+            )
+        )
         return energy
 
     res = minimize(cost, params0, method="COBYLA", options={"maxiter": max_iterations})

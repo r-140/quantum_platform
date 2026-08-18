@@ -10,18 +10,30 @@ deleted and the API stopped executing anything itself) -- both were thin
 adapters unpacking a different request/message format into calls to the
 same quantum_core.execution functions. This one unpacks `task.params`, a
 plain dict, instead of a Pydantic request object.
+
+The `vqe` branch additionally publishes per-iteration hw/sw-loop metrics
+via app/tasks/vqe_metrics.py, if a kafka_producer is passed in -- see that
+module's docstring for why this happens here rather than inside
+quantum_core, and why it's "after the run completes" rather than truly
+live during it.
 """
 
 from __future__ import annotations
 
 import asyncio
 
+from aiokafka import AIOKafkaProducer
+
 from quantum_core.backends.base import QuantumBackend
 from quantum_core.execution import run_grover, run_qpe, run_sat_grover, run_vqe_sync
 from quantum_core.tasks import ExperimentTask
 
+from app.tasks.vqe_metrics import publish_vqe_history
 
-async def execute_task(backend: QuantumBackend, task: ExperimentTask) -> dict:
+
+async def execute_task(
+    backend: QuantumBackend, task: ExperimentTask, kafka_producer: AIOKafkaProducer | None = None
+) -> dict:
     params = task.params
 
     if task.algorithm == "grover":
@@ -48,12 +60,24 @@ async def execute_task(backend: QuantumBackend, task: ExperimentTask) -> dict:
         # block this worker's event loop for its entire ~1 minute runtime,
         # stalling every other queued task behind it.
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        result = await loop.run_in_executor(
             None,
             run_vqe_sync,
             backend,
             params.get("shots", 8192),
             params.get("max_iterations", 80),
         )
+
+        # Publish per-iteration hw/sw-loop metrics (see
+        # app/tasks/vqe_metrics.py) -- back on this event loop now, after
+        # run_in_executor returned, not from inside the background thread
+        # (AIOKafkaProducer isn't safe to drive cross-thread). Only if a
+        # producer was actually passed in -- e.g. tests calling
+        # execute_task directly, without a real broker, pass none and get
+        # the old behavior unchanged.
+        if kafka_producer is not None and "history" in result:
+            await publish_vqe_history(kafka_producer, task.experiment_id, result["history"])
+
+        return result
 
     raise ValueError(f"unknown algorithm {task.algorithm!r}")
