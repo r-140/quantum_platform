@@ -28,13 +28,12 @@ datasources:
     secureJsonData:
       password: quantum
     jsonData:
+      database: quantum_platform
       sslmode: disable
       postgresVersion: 1600
       timescaledb: false
     editable: false
 
-  # calibration_events hypertable -- the actual SRE/telemetry use case
-  # this whole debug/ops stack was built for (see docs/architecture/kafka.md).
   - name: TimescaleDB (telemetry)
     uid: timescaledb-telemetry
     type: postgres
@@ -45,6 +44,7 @@ datasources:
     secureJsonData:
       password: quantum
     jsonData:
+      database: telemetry
       sslmode: disable
       postgresVersion: 1600
       timescaledb: true
