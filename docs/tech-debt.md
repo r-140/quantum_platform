@@ -68,9 +68,24 @@ one specific service.
   viewing to matter.
 
 - **Faust → output topic → TimescaleDB → Grafana** (see `kafka.md`) —
-  right now Faust's windowed `Table` is only visible in the worker's own
-  logs; making that aggregate visible in Grafana needs a bridge through
-  a dedicated output topic.
+  expose Faust's VQE tumbling-window aggregation through a dedicated
+  output topic and persist it in TimescaleDB for visualization.
+
+  **✅ Done** — `process_vqe_iteration()` maintains a changelog-backed
+  Faust tumbling `Table` (`vqe_window_state`) keyed by `experiment_id`
+  and publishes the derived `VQEWindowMetricsEvent` to the
+  `vqe-window-metrics` Kafka topic. `consumer.py` consumes that topic
+  and persists the aggregates to the `vqe_window_metrics` TimescaleDB
+  hypertable. A separate **VQE Window Metrics** Grafana dashboard
+  visualizes the aggregated metrics, keeping them separate from the
+  raw per-iteration VQE dashboard.
+
+  The window currently uses a 60-second tumbling interval and exposes
+  iteration count, average/best energy, average quantum/classical
+  execution time, their ratio, retry count, and circuit-breaker trips.
+  The resulting TimescaleDB table has been verified with real data
+  (`140` rows in both `vqe_iteration_metrics` and
+  `vqe_window_metrics` during the initial end-to-end run).
 
 - **LiH/BeH₂ + an OOP refactor of the molecule code** — extend VQE from
   H₂ to larger molecules; an abstract `Molecule`/`MolecularHamiltonian`,

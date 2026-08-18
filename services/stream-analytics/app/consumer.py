@@ -39,7 +39,7 @@ import os
 from aiokafka import AIOKafkaConsumer
 
 from app.rolling import RollingErrorRate
-from app.sinks.timescale_sink import create_pool, insert_calibration_event, insert_vqe_iteration_metric
+from app.sinks.timescale_sink import create_pool, insert_calibration_event, insert_vqe_iteration_metric, insert_vqe_window_metric
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("stream-analytics")
@@ -47,6 +47,7 @@ logger = logging.getLogger("stream-analytics")
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 CALIBRATION_TOPIC = "calibration-results"
 VQE_METRICS_TOPIC = "vqe-iteration-metrics"
+VQE_WINDOW_METRICS_TOPIC = "vqe-window-metrics"
 TIMESCALE_DSN = os.environ.get(
     "TIMESCALE_DSN", "postgresql://quantum:quantum@localhost:5433/telemetry"
 )
@@ -64,23 +65,33 @@ async def consume_calibration_results() -> None:
     consumer = AIOKafkaConsumer(
         CALIBRATION_TOPIC,
         VQE_METRICS_TOPIC,
+        VQE_WINDOW_METRICS_TOPIC,
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         group_id="stream-analytics",
         auto_offset_reset="latest",
     )
+
     rolling = RollingErrorRate()
     timescale_pool = await create_pool(TIMESCALE_DSN)
 
     await consumer.start()
-    logger.info("stream-analytics started, consuming %r and %r", CALIBRATION_TOPIC, VQE_METRICS_TOPIC)
+
+    logger.info(
+        "stream-analytics started, consuming %r, %r and %r",
+        CALIBRATION_TOPIC,
+        VQE_METRICS_TOPIC,
+        VQE_WINDOW_METRICS_TOPIC,
+    )
+
     try:
         async for message in consumer:
             payload = json.loads(message.value.decode())
 
             if message.topic == VQE_METRICS_TOPIC:
                 logger.info(
-                    "vqe experiment_id=%s iteration=%d energy=%.6f "
-                    "quantum_time=%.3fs classical_time=%.3fs retries=%d breaker_trips=%d",
+                    "vqe iteration experiment_id=%s iteration=%d energy=%.6f "
+                    "quantum_time=%.3fs classical_time=%.3fs "
+                    "retries=%d breaker_trips=%d",
                     payload["experiment_id"],
                     payload["iteration"],
                     payload["energy"],
@@ -89,17 +100,58 @@ async def consume_calibration_results() -> None:
                     payload["retry_count"],
                     payload["circuit_breaker_trips"],
                 )
+
                 try:
-                    await insert_vqe_iteration_metric(timescale_pool, payload)
-                except Exception:  # noqa: BLE001 -- a failed write shouldn't stop consuming
-                    logger.exception("failed to persist vqe iteration metric to TimescaleDB")
+                    await insert_vqe_iteration_metric(
+                        timescale_pool,
+                        payload,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "failed to persist vqe iteration metric to TimescaleDB"
+                    )
+
+                continue
+
+            if message.topic == VQE_WINDOW_METRICS_TOPIC:
+                logger.info(
+                    "vqe window experiment_id=%s window=%ss iterations=%d "
+                    "avg_energy=%.6f best_energy=%.6f "
+                    "quantum_time=%.3fs classical_time=%.3fs ratio=%.2f "
+                    "retries=%d breaker_trips=%d",
+                    payload["experiment_id"],
+                    payload["window_size_s"],
+                    payload["iteration_count"],
+                    payload["avg_energy"],
+                    payload["best_energy"],
+                    payload["avg_quantum_time_s"],
+                    payload["avg_classical_time_s"],
+                    payload["quantum_classical_ratio"],
+                    payload["retry_count"],
+                    payload["circuit_breaker_trips"],
+                )
+
+                try:
+                    await insert_vqe_window_metric(
+                        timescale_pool,
+                        payload,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "failed to persist vqe window metric to TimescaleDB"
+                    )
+
                 continue
 
             # message.topic == CALIBRATION_TOPIC
             backend_name = payload["backend_name"]
             error_rate = payload["error_rate"]
 
-            rolling_avg = rolling.add_sample(backend_name, error_rate)
+            rolling_avg = rolling.add_sample(
+                backend_name,
+                error_rate,
+            )
+
             logger.info(
                 "backend=%s error_rate=%.4f rolling_avg(n=%d)=%.4f",
                 backend_name,
@@ -110,16 +162,23 @@ async def consume_calibration_results() -> None:
 
             if rolling_avg > ALERT_THRESHOLD:
                 logger.warning(
-                    "ALERT: backend=%s rolling average error_rate=%.4f exceeds threshold %.4f",
+                    "ALERT: backend=%s rolling average error_rate=%.4f "
+                    "exceeds threshold %.4f",
                     backend_name,
                     rolling_avg,
                     ALERT_THRESHOLD,
                 )
 
             try:
-                await insert_calibration_event(timescale_pool, payload)
-            except Exception:  # noqa: BLE001 -- a failed write shouldn't stop consuming
-                logger.exception("failed to persist calibration event to TimescaleDB")
+                await insert_calibration_event(
+                    timescale_pool,
+                    payload,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "failed to persist calibration event to TimescaleDB"
+                )
+
     finally:
         await consumer.stop()
         await timescale_pool.close()

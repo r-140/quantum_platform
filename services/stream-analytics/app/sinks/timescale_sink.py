@@ -42,6 +42,23 @@ INSERT INTO vqe_iteration_metrics
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 """
 
+_INSERT_VQE_WINDOW_METRIC_SQL = """
+INSERT INTO vqe_window_metrics
+    (
+        time,
+        experiment_id,
+        window_size_s,
+        iteration_count,
+        avg_energy,
+        best_energy,
+        avg_quantum_time_s,
+        avg_classical_time_s,
+        quantum_classical_ratio,
+        retry_count,
+        circuit_breaker_trips
+    )
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+"""
 
 async def create_pool(dsn: str) -> asyncpg.Pool:
     return await asyncpg.create_pool(dsn)
@@ -87,6 +104,29 @@ async def insert_vqe_iteration_metric(pool: asyncpg.Pool, payload: dict[str, Any
         payload["energy"],
         payload["quantum_time_s"],
         payload["classical_time_s"],
+        payload["retry_count"],
+        payload["circuit_breaker_trips"],
+    )
+
+async def insert_vqe_window_metric(
+    pool: asyncpg.Pool,
+    payload: dict[str, Any],
+) -> None:
+    """Persist one Faust-derived VQE window snapshot."""
+
+    timestamp = datetime.fromisoformat(payload["timestamp"])
+
+    await pool.execute(
+        _INSERT_VQE_WINDOW_METRIC_SQL,
+        timestamp,
+        payload["experiment_id"],
+        payload["window_size_s"],
+        payload["iteration_count"],
+        payload["avg_energy"],
+        payload["best_energy"],
+        payload["avg_quantum_time_s"],
+        payload["avg_classical_time_s"],
+        payload["quantum_classical_ratio"],
         payload["retry_count"],
         payload["circuit_breaker_trips"],
     )

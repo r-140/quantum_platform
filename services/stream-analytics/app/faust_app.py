@@ -101,6 +101,8 @@ KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9
 CALIBRATION_TOPIC = "calibration-results"
 ALERTS_TOPIC = "calibration-alerts"
 DRIFT_ALERTS_TOPIC = "calibration-drift-alerts"
+VQE_ITERATION_TOPIC = "vqe-iteration-metrics"
+VQE_WINDOW_TOPIC = "vqe-window-metrics"
 
 # In-memory only (not changelog-backed like the Tables below) -- this is
 # purely a "what just happened" feed for the dashboard, not a source of
@@ -124,6 +126,7 @@ def _record_event(kind: str, backend_name: str, level: str, **extra: float) -> N
             **extra,
         }
     )
+
 
 # Z-score hysteresis is deliberately separate from the flat-threshold
 # alerting in alerting.py -- a z-score of 3+ is already a fairly strong
@@ -198,6 +201,90 @@ class AlertStateRecord(faust.Record, serializer="json"):
     consecutive_ok: int = 0
 
 
+class VQEIterationMetricsEvent(faust.Record, serializer="json"):
+    """Kafka representation of one VQE optimizer iteration.
+
+    This deliberately mirrors the Kafka contract rather than importing
+    quantum-core's VQEIterationLog. quantum-core is an algorithm library
+    and must remain unaware of Kafka/Faust.
+    """
+
+    timestamp: str
+    experiment_id: str
+    iteration: int
+    params: list[float]
+    energy: float
+    quantum_time_s: float
+    classical_time_s: float
+    retry_count: int
+    circuit_breaker_trips: int
+
+class VQEWindowState(faust.Record, serializer="json"):
+    """Mutable aggregate state for one VQE experiment/window.
+
+    The state is stored in the Faust `vqe_window_state` tumbling Table
+    rather than keeping individual iterations in memory. Each incoming
+    `VQEIterationMetricsEvent` updates these running aggregates in O(1).
+
+    Only sufficient statistics are retained: sums/counts for averages
+    and the minimum energy for convergence tracking. The individual
+    iteration records remain available in the source Kafka topic and
+    TimescaleDB hypertable.
+
+    The table is keyed by `experiment_id` and uses the same 60-second
+    tumbling window as the resulting `VQEWindowMetricsEvent`.
+    """
+    iteration_count: int = 0
+
+    energy_sum: float = 0.0
+    best_energy: float = 0.0
+
+    quantum_time_sum: float = 0.0
+    classical_time_sum: float = 0.0
+
+    retry_count: int = 0
+    circuit_breaker_trips: int = 0
+
+class VQEWindowMetricsEvent(faust.Record, serializer="json"):
+    """Derived VQE metrics published for the current tumbling window.
+
+    One event is emitted for every processed VQE iteration. Therefore the
+    same window can produce multiple progressively updated events:
+
+        iteration 1 -> n=1
+        iteration 2 -> n=2
+        ...
+        iteration N -> n=N
+
+    `avg_energy` and execution-time fields are calculated from the
+    aggregate state, while `best_energy` represents the minimum energy
+    observed so far in the current window.
+
+    `quantum_classical_ratio` is calculated as:
+
+        avg_quantum_time_s / avg_classical_time_s
+
+    A zero ratio is emitted when the classical execution time is zero
+    to avoid division by zero.
+
+    The event is consumed by `timescale_sink.py` and persisted in the
+    `vqe_window_metrics` TimescaleDB hypertable for Grafana and other
+    analytical consumers.
+    """
+
+    timestamp: str
+    experiment_id: str
+    window_size_s: int
+    iteration_count: int
+    avg_energy: float
+    best_energy: float
+    avg_quantum_time_s: float
+    avg_classical_time_s: float
+    quantum_classical_ratio: float
+    retry_count: int
+    circuit_breaker_trips: int
+
+
 class WelfordRecord(faust.Record, serializer="json"):
     """The Kafka-serializable mirror of app.drift.WelfordStats. Unlike
     AlertStateRecord, no enum conversion is needed -- count/mean/m2 are
@@ -230,6 +317,9 @@ class DriftAlertEvent(faust.Record, serializer="json"):
 calibration_topic = app.topic(CALIBRATION_TOPIC, value_type=CalibrationEvent)
 alerts_topic = app.topic(ALERTS_TOPIC, value_type=AlertEvent)
 drift_alerts_topic = app.topic(DRIFT_ALERTS_TOPIC, value_type=DriftAlertEvent)
+vqe_iteration_topic = app.topic(VQE_ITERATION_TOPIC, value_type=VQEIterationMetricsEvent)
+vqe_window_topic = app.topic(VQE_WINDOW_TOPIC, value_type=VQEWindowMetricsEvent)
+
 
 # Two parallel windowed tables (running sum, running count) rather than one
 # table storing a composite value -- keeps each table's `default` a plain
@@ -241,6 +331,16 @@ error_rate_sum = app.Table(
 sample_count = app.Table(
     "sample_count", default=int, help="Number of calibration samples per backend within the current 60s tumbling window"
 ).tumbling(WINDOW_SIZE_S, expires=timedelta(seconds=WINDOW_EXPIRES_S))
+
+
+vqe_window_state = app.Table(
+    "vqe_window_state",
+    default=VQEWindowState,
+    help="Per-experiment VQE metrics within the tumbling window",
+).tumbling(
+    WINDOW_SIZE_S,
+    expires=timedelta(seconds=WINDOW_EXPIRES_S),
+)
 
 # NOT windowed -- unlike the two tables above, alert hysteresis state is
 # meant to persist indefinitely per backend (a "currently alerting"
@@ -425,6 +525,107 @@ async def process_calibration_event(stream):
                         baseline_stddev=new_welford.stddev,
                     ),
                 )
+
+@app.agent(vqe_iteration_topic)
+async def process_vqe_iteration(stream):
+    """Aggregate VQE optimizer iterations into 60-second windows.
+
+    Topology:
+
+        vqe-iteration-metrics
+                |
+                | group_by(experiment_id)
+                v
+        vqe_window_state
+        (60s tumbling Faust Table)
+                |
+                v
+        VQEWindowMetricsEvent
+                |
+                v
+        vqe-window-metrics
+
+    `group_by(experiment_id)` ensures that all iterations belonging to
+    the same experiment are processed against the same keyed table
+    state when the topic is partitioned across multiple workers.
+
+    The table stores only aggregate state, so processing each iteration
+    is O(1) in both memory and computation. The raw iteration event is
+    never replaced by the aggregate: it remains available through the
+    source Kafka topic and the TimescaleDB `vqe_iteration_metrics`
+    hypertable.
+
+    The derived event is emitted after every iteration rather than only
+    when the tumbling window closes. This makes the stream useful for
+    near-real-time dashboards: Grafana can display convergence and
+    execution-time metrics while the VQE experiment is still running.
+    """
+    async for event in stream.group_by(VQEIterationMetricsEvent.experiment_id):
+        experiment_id = event.experiment_id
+
+        state = vqe_window_state[experiment_id].now()
+
+        # Update aggregate state for the current tumbling window.
+        state.iteration_count += 1
+        state.energy_sum += event.energy
+        state.quantum_time_sum += event.quantum_time_s
+        state.classical_time_sum += event.classical_time_s
+        state.retry_count += event.retry_count
+        state.circuit_breaker_trips += event.circuit_breaker_trips
+
+        # 0.0 is a valid energy, so use iteration_count rather than
+        # best_energy as the sentinel for the first observation.
+        if state.iteration_count == 1:
+            state.best_energy = event.energy
+        else:
+            state.best_energy = min(state.best_energy, event.energy)
+
+        vqe_window_state[experiment_id] = state
+
+        count = state.iteration_count
+
+        avg_energy = state.energy_sum / count
+        avg_quantum = state.quantum_time_sum / count
+        avg_classical = state.classical_time_sum / count
+
+        ratio = (
+            avg_quantum / avg_classical
+            if avg_classical > 0.0
+            else 0.0
+        )
+
+        window_metric = VQEWindowMetricsEvent(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            experiment_id=experiment_id,
+            window_size_s=int(WINDOW_SIZE_S),
+            iteration_count=count,
+            avg_energy=avg_energy,
+            best_energy=state.best_energy,
+            avg_quantum_time_s=avg_quantum,
+            avg_classical_time_s=avg_classical,
+            quantum_classical_ratio=ratio,
+            retry_count=state.retry_count,
+            circuit_breaker_trips=state.circuit_breaker_trips,
+        )
+
+        await vqe_window_topic.send(
+            key=experiment_id,
+            value=window_metric,
+        )
+
+        logger.info(
+            "[faust] vqe experiment=%s window=%ss n=%d "
+            "avg_energy=%.6f best_energy=%.6f "
+            "quantum=%.3fs classical=%.3fs ratio=%.2f",
+            experiment_id,
+            int(WINDOW_SIZE_S),
+            count,
+            avg_energy,
+            state.best_energy,
+            avg_quantum,
+            avg_classical,
+            ratio,
+        )
 
 
 @app.page("/api/state")
