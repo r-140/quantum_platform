@@ -134,8 +134,12 @@ async def evaluate_energy(
         handle = await backend.submit(circuit)
 
         term_metrics = PollingMetrics() if metrics is not None else None
+        effective_polling_config = polling_config or PollingConfig(
+            initial_interval_s=backend.polling_initial_interval_s,
+            max_interval_s=backend.polling_max_interval_s,
+        )
         result = await wait_for_result(
-            backend, handle, config=polling_config or PollingConfig(), metrics=term_metrics
+            backend, handle, config=effective_polling_config, metrics=term_metrics
         )
 
         if metrics is not None and term_metrics is not None:

@@ -47,5 +47,6 @@ class ExperimentRow(Base):
     # timestamp type at all, so this mismatch had no way to surface there).
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    parameters: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

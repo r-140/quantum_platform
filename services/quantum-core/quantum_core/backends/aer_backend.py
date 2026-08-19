@@ -50,6 +50,8 @@ class AerBackend(QuantumBackend):
     """
 
     name = "aer-simulator"
+    polling_initial_interval_s = 0.01
+    polling_max_interval_s = 0.1
 
     def __init__(self, *, method: str = "automatic", seed_simulator: int | None = None) -> None:
         self._sim = AerSimulator(method=method)

@@ -71,7 +71,13 @@ def _random_bitstring(n: int) -> str:
 VQE_MOLECULES = ("h2", "lih", "beh2")
 
 
-def build_payload(algorithm: str, *, vqe_molecule: str = "h2") -> dict:
+def build_payload(
+    algorithm: str,
+    *,
+    vqe_molecule: str = "h2",
+    vqe_shots: int = 1024,
+    vqe_max_iterations: int = 5,
+) -> dict:
     """One payload builder per algorithm. VQE's `max_iterations` is
     deliberately lower than the API default (80) -- at 80 a single VQE
     submission takes roughly a minute, which would dominate this script's
@@ -98,7 +104,8 @@ def build_payload(algorithm: str, *, vqe_molecule: str = "h2") -> dict:
         return {
             "algorithm": "vqe",
             "molecule": vqe_molecule,
-            "max_iterations": 20,
+            "shots": vqe_shots,
+            "max_iterations": vqe_max_iterations,
         }
     raise ValueError(f"unknown algorithm {algorithm!r}")
 
@@ -127,6 +134,8 @@ async def load_generator(
     duration: float,
     weights: dict[str, float],
     vqe_molecule: str,
+    vqe_shots: int,
+    vqe_max_iterations: int,
 ) -> None:
     """Submits experiments at roughly `rate` per second for `duration`
     seconds, picking an algorithm per submission according to `weights`.
@@ -145,7 +154,12 @@ async def load_generator(
             selected_molecule = (
                 random.choice(VQE_MOLECULES) if vqe_molecule == "mixed" else vqe_molecule
             )
-        payload = build_payload(algorithm, vqe_molecule=selected_molecule or "h2")
+        payload = build_payload(
+            algorithm,
+            vqe_molecule=selected_molecule or "h2",
+            vqe_shots=vqe_shots,
+            vqe_max_iterations=vqe_max_iterations,
+        )
         try:
             response = await client.post("/experiments", json=payload, timeout=10.0)
             response.raise_for_status()
@@ -346,6 +360,18 @@ async def main() -> None:
         ),
     )
     parser.add_argument(
+        "--vqe-shots",
+        type=int,
+        default=1024,
+        help="shots per measured Pauli term (default: 1024)",
+    )
+    parser.add_argument(
+        "--vqe-max-iterations",
+        type=int,
+        default=5,
+        help="maximum COBYLA evaluations per VQE experiment (default: 5)",
+    )
+    parser.add_argument(
         "--max-wait",
         type=float,
         default=180.0,
@@ -371,6 +397,8 @@ async def main() -> None:
             duration=args.duration,
             weights=weights,
             vqe_molecule=args.vqe_molecule,
+            vqe_shots=args.vqe_shots,
+            vqe_max_iterations=args.vqe_max_iterations,
         )
         submitters_done.set()
 

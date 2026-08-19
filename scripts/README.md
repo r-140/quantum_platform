@@ -25,6 +25,7 @@ Requires the full stack running (`./dev.sh` from the repo root).
 ./scripts/run_observe.sh --rate 2.0 --duration 30            # more intense and longer
 ./scripts/run_observe.sh --vqe-weight 0.5 --grover-weight 0.5 --sat-grover-weight 0 --qpe-weight 0  # almost all VQE — see the queue backlog clearly
 ./scripts/run_observe.sh --vqe-molecule h2 --vqe-weight 1 --grover-weight 0 --sat-grover-weight 0 --qpe-weight 0
+./scripts/run_observe.sh --vqe-molecule lih --vqe-shots 1024 --vqe-max-iterations 5 --vqe-weight 1 --grover-weight 0 --sat-grover-weight 0 --qpe-weight 0 --rate 0.05 --duration 5
 ./scripts/run_observe.sh --vqe-molecule lih --vqe-weight 1 --grover-weight 0 --sat-grover-weight 0 --qpe-weight 0
 ./scripts/run_observe.sh --vqe-molecule beh2 --vqe-weight 1 --grover-weight 0 --sat-grover-weight 0 --qpe-weight 0
 ```
@@ -33,6 +34,11 @@ Requires the full stack running (`./dev.sh` from the repo root).
 `h2`. `mixed` selects a molecule independently for every VQE submission.
 LiH and BeH2 Hamiltonians are generated once per orchestrator process from
 the pinned PySCF/Qiskit Nature configuration and then cached.
+
+The observer deliberately uses smaller VQE defaults than the API:
+`--vqe-shots 1024` and `--vqe-max-iterations 5`. Larger molecules contain
+many more Pauli terms than H2, so the API defaults (8192 shots and 80
+iterations) are unsuitable for a quick mixed-load demonstration.
 
 `run_observe.sh` creates its own `.venv` and installs dependencies on
 first run (and just quickly re-checks them on later runs), so you don't

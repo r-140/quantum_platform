@@ -482,7 +482,9 @@ function moleculeLabel(name) {
 
 function experimentLabel(exp) {
   const algorithm = ALGO_LABELS[exp.algorithm] || exp.algorithm;
-  const molecule = exp.algorithm === 'vqe' ? exp.result?.molecule : null;
+  const molecule = exp.algorithm === 'vqe'
+    ? (exp.parameters?.molecule || exp.result?.molecule)
+    : null;
   return molecule ? `${algorithm} · ${moleculeLabel(molecule)}` : algorithm;
 }
 const STATUS_LABELS = { queued: 'queued', completed: 'completed', failed: 'failed' };
@@ -593,10 +595,16 @@ function openDetail(id) {
     <div class="detail-row"><span class="label">duration</span><span class="value">${fmtDuration(exp.submitted_at, exp.completed_at)}</span></div>
   `;
 
+  const molecule = exp.algorithm === 'vqe'
+    ? (exp.parameters?.molecule || exp.result?.molecule)
+    : null;
+  if (molecule) {
+    body += `<div class="detail-row"><span class="label">molecule</span><span class="mono">${moleculeLabel(molecule)}</span></div>`;
+  }
+  if (exp.parameters) {
+    body += `<div class="detail-section-title">parameters</div><pre class="result-json">${JSON.stringify(exp.parameters, null, 2)}</pre>`;
+  }
   if (exp.result) {
-    if (exp.algorithm === 'vqe' && exp.result.molecule) {
-      body += `<div class="detail-row"><span class="label">molecule</span><span class="mono">${moleculeLabel(exp.result.molecule)}</span></div>`;
-    }
     body += `<div class="detail-section-title">result</div><pre class="result-json">${JSON.stringify(exp.result, null, 2)}</pre>`;
   }
   if (exp.error) {

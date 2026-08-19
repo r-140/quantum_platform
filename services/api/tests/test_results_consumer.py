@@ -21,6 +21,7 @@ def _queued_experiment(experiment_id: str) -> ExperimentResponse:
         algorithm="grover",
         status=ExperimentStatus.QUEUED,
         submitted_at=datetime.now(timezone.utc),
+        parameters={"marked_states": ["101"], "shots": 1024},
     )
 
 
@@ -80,3 +81,4 @@ async def test_original_submitted_at_is_preserved() -> None:
 
     updated = await store.get("abc")
     assert updated.submitted_at == original.submitted_at
+    assert updated.parameters == original.parameters

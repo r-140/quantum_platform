@@ -44,6 +44,7 @@ async def submit_experiment(
 ) -> ExperimentResponse:
     experiment_id = str(uuid.uuid4())
     submitted_at = utcnow()
+    parameters = request.model_dump(exclude={"algorithm"})
 
     # Save the QUEUED record *before* publishing -- so that even in the
     # unlikely case where the orchestrator processes the task and the
@@ -55,13 +56,14 @@ async def submit_experiment(
         algorithm=request.algorithm,
         status=ExperimentStatus.QUEUED,
         submitted_at=submitted_at,
+        parameters=parameters,
     )
     await store.save(response)
 
     task = ExperimentTask(
         experiment_id=experiment_id,
         algorithm=request.algorithm,
-        params=request.model_dump(exclude={"algorithm"}),
+        params=parameters,
     )
 
     try:
@@ -76,6 +78,7 @@ async def submit_experiment(
             algorithm=request.algorithm,
             status=ExperimentStatus.FAILED,
             submitted_at=submitted_at,
+            parameters=parameters,
             completed_at=utcnow(),
             error=f"failed to enqueue: {exc}",
         )

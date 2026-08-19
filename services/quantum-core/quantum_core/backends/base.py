@@ -72,6 +72,12 @@ class TransientBackendError(Exception):
 
 
 class QuantumBackend(ABC):
+    # Backends may override these hints. Remote hardware should be polled
+    # conservatively; an in-process simulator can be checked much sooner
+    # without generating network/API load.
+    polling_initial_interval_s: float = 0.25
+    polling_max_interval_s: float = 5.0
+
     """Abstract hardware/software boundary.
 
     Every method is async because real backends involve network I/O and

@@ -97,6 +97,10 @@ class ExperimentResponse(BaseModel):
     algorithm: Algorithm
     status: ExperimentStatus
     submitted_at: datetime
+    parameters: dict | None = Field(
+        default=None,
+        description="Validated algorithm-specific request parameters used for execution.",
+    )
     completed_at: datetime | None = None
     result: dict | None = Field(
         default=None, description="Algorithm-specific result payload, e.g. counts or energy."
