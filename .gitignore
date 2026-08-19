@@ -14,3 +14,5 @@ venv/
 
 # dev.sh logs
 .dev-logs/
+
+*.patch

@@ -24,7 +24,16 @@ Requires the full stack running (`./dev.sh` from the repo root).
 ./scripts/run_observe.sh                                    # defaults: 1 exp/sec, 20 seconds
 ./scripts/run_observe.sh --rate 2.0 --duration 30            # more intense and longer
 ./scripts/run_observe.sh --vqe-weight 0.5 --grover-weight 0.5 --sat-grover-weight 0 --qpe-weight 0  # almost all VQE — see the queue backlog clearly
+./scripts/run_observe.sh --vqe-molecule h2 --vqe-weight 1 --grover-weight 0 --sat-grover-weight 0 --qpe-weight 0
+./scripts/run_observe.sh --vqe-molecule lih --vqe-weight 1 --grover-weight 0 --sat-grover-weight 0 --qpe-weight 0
+./scripts/run_observe.sh --vqe-molecule beh2 --vqe-weight 1 --grover-weight 0 --sat-grover-weight 0 --qpe-weight 0
 ```
+
+`--vqe-molecule` accepts `h2`, `lih`, `beh2`, or `mixed`. The default is
+`h2`. `mixed` selects a molecule independently for every VQE submission.
+LiH and BeH2 requests require their verified Hamiltonians to be registered
+by `quantum_core`; until then the API intentionally rejects them rather than
+silently running an H2 Hamiltonian under the wrong molecule name.
 
 `run_observe.sh` creates its own `.venv` and installs dependencies on
 first run (and just quickly re-checks them on later runs), so you don't

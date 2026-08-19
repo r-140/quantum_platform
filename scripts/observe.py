@@ -68,7 +68,10 @@ def _random_bitstring(n: int) -> str:
     return "".join(random.choice("01") for _ in range(n))
 
 
-def build_payload(algorithm: str) -> dict:
+VQE_MOLECULES = ("h2", "lih", "beh2")
+
+
+def build_payload(algorithm: str, *, vqe_molecule: str = "h2") -> dict:
     """One payload builder per algorithm. VQE's `max_iterations` is
     deliberately lower than the API default (80) -- at 80 a single VQE
     submission takes roughly a minute, which would dominate this script's
@@ -88,7 +91,15 @@ def build_payload(algorithm: str) -> dict:
     if algorithm == "qpe":
         return {"algorithm": "qpe", "phi": round(random.random(), 3)}
     if algorithm == "vqe":
-        return {"algorithm": "vqe", "max_iterations": 20}
+        if vqe_molecule not in VQE_MOLECULES:
+            raise ValueError(
+                f"unknown VQE molecule {vqe_molecule!r}; expected one of {VQE_MOLECULES}"
+            )
+        return {
+            "algorithm": "vqe",
+            "molecule": vqe_molecule,
+            "max_iterations": 20,
+        }
     raise ValueError(f"unknown algorithm {algorithm!r}")
 
 
@@ -96,6 +107,7 @@ def build_payload(algorithm: str) -> dict:
 class TrackedExperiment:
     id: str
     algorithm: str
+    molecule: str | None
     submitted_at: float
     status: str = "queued"
     resolved_at: float | None = None
@@ -114,6 +126,7 @@ async def load_generator(
     rate: float,
     duration: float,
     weights: dict[str, float],
+    vqe_molecule: str,
 ) -> None:
     """Submits experiments at roughly `rate` per second for `duration`
     seconds, picking an algorithm per submission according to `weights`.
@@ -127,15 +140,24 @@ async def load_generator(
 
     while time.monotonic() < end_time and not state.stop.is_set():
         algorithm = random.choices(algorithms, weights=algorithm_weights, k=1)[0]
-        payload = build_payload(algorithm)
+        selected_molecule = None
+        if algorithm == "vqe":
+            selected_molecule = (
+                random.choice(VQE_MOLECULES) if vqe_molecule == "mixed" else vqe_molecule
+            )
+        payload = build_payload(algorithm, vqe_molecule=selected_molecule or "h2")
         try:
             response = await client.post("/experiments", json=payload, timeout=10.0)
             response.raise_for_status()
             body = response.json()
             state.tracked[body["id"]] = TrackedExperiment(
-                id=body["id"], algorithm=algorithm, submitted_at=time.monotonic()
+                id=body["id"],
+                algorithm=algorithm,
+                molecule=selected_molecule,
+                submitted_at=time.monotonic(),
             )
-            logger.info("[submit] %s id=%s", algorithm, body["id"])
+            label = f"vqe/{selected_molecule}" if selected_molecule else algorithm
+            logger.info("[submit] %s id=%s", label, body["id"])
         except httpx.HTTPError as exc:
             logger.error("[submit] failed for %s: %s", algorithm, exc)
 
@@ -167,7 +189,7 @@ async def status_poller(client: httpx.AsyncClient, state: SharedState, *, poll_i
                 elapsed = tracked.resolved_at - tracked.submitted_at
                 logger.info(
                     "[status] %s id=%s -> %s (%.2fs)",
-                    tracked.algorithm,
+                    f"vqe/{tracked.molecule}" if tracked.molecule else tracked.algorithm,
                     tracked.id,
                     tracked.status,
                     elapsed,
@@ -308,6 +330,15 @@ async def main() -> None:
     parser.add_argument("--qpe-weight", type=float, default=0.2)
     parser.add_argument("--vqe-weight", type=float, default=0.1)
     parser.add_argument(
+        "--vqe-molecule",
+        choices=(*VQE_MOLECULES, "mixed"),
+        default="h2",
+        help=(
+            "molecule used for VQE requests; 'mixed' samples h2/lih/beh2. "
+            "LiH and BeH2 require their verified Hamiltonians to be registered"
+        ),
+    )
+    parser.add_argument(
         "--max-wait",
         type=float,
         default=180.0,
@@ -326,7 +357,14 @@ async def main() -> None:
     submitters_done = asyncio.Event()
 
     async def run_load_generator(client: httpx.AsyncClient) -> None:
-        await load_generator(client, state, rate=args.rate, duration=args.duration, weights=weights)
+        await load_generator(
+            client,
+            state,
+            rate=args.rate,
+            duration=args.duration,
+            weights=weights,
+            vqe_molecule=args.vqe_molecule,
+        )
         submitters_done.set()
 
     async with httpx.AsyncClient(base_url=API_URL) as client:

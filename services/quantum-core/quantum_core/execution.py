@@ -21,8 +21,8 @@ from dataclasses import asdict
 from quantum_core.algorithms.grover import GroverProblem, build_grover_circuit, optimal_iterations
 from quantum_core.algorithms.qpe import build_qpe_circuit
 from quantum_core.algorithms.sat_search import BooleanSearchProblem, build_sat_grover_circuit
-from quantum_core.algorithms.vqe import H2_NUCLEAR_REPULSION
 from quantum_core.backends.base import Circuit, QuantumBackend
+from quantum_core.chemistry.molecules import get_molecule
 from quantum_core.loops.vqe_loop import run_vqe
 from quantum_core.sync.polling import PollingConfig, wait_for_result
 
@@ -106,7 +106,12 @@ async def run_qpe(
     }
 
 
-def run_vqe_sync(backend: QuantumBackend, shots: int = 8192, max_iterations: int = 80) -> dict:
+def run_vqe_sync(
+    backend: QuantumBackend,
+    shots: int = 8192,
+    max_iterations: int = 80,
+    molecule_name: str = "h2",
+) -> dict:
     """Synchronous by design -- `run_vqe` bridges to asyncio internally per
     optimizer iteration (see quantum_core/loops/vqe_loop.py) and must be
     called from a plain sync context. Callers in an async context (like the
@@ -124,12 +129,20 @@ def run_vqe_sync(backend: QuantumBackend, shots: int = 8192, max_iterations: int
     services/orchestrator/app/tasks/vqe_metrics.py and
     docs/tech-debt.md's "VQE metrics for the hw/sw interaction loop" item).
     """
-    result = run_vqe(backend, shots=shots, max_iterations=max_iterations)
+    molecule = get_molecule(molecule_name)
+    result = run_vqe(
+        backend, shots=shots, max_iterations=max_iterations, molecule=molecule
+    )
     return {
+        "molecule": molecule.name,
+        "num_qubits": molecule.num_qubits,
+        "geometry": molecule.geometry,
+        "mapping": molecule.mapping,
         "optimal_params": result.optimal_params,
         "electronic_energy": result.electronic_energy,
-        "nuclear_repulsion": H2_NUCLEAR_REPULSION,
+        "nuclear_repulsion": molecule.nuclear_repulsion,
         "total_energy": result.total_energy,
+        "reference_ground_energy": molecule.reference_ground_energy,
         "iterations_run": len(result.history),
         "history": [asdict(log) for log in result.history],
     }

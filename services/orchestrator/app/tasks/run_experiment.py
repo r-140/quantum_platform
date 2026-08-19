@@ -62,10 +62,12 @@ async def execute_task(
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
-            run_vqe_sync,
-            backend,
-            params.get("shots", 8192),
-            params.get("max_iterations", 80),
+            lambda: run_vqe_sync(
+                backend,
+                shots=params.get("shots", 8192),
+                max_iterations=params.get("max_iterations", 80),
+                molecule_name=params.get("molecule", "h2"),
+            ),
         )
 
         # Publish per-iteration hw/sw-loop metrics (see

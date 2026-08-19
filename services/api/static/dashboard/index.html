@@ -475,6 +475,16 @@ const state = {
 };
 
 const ALGO_LABELS = { grover: 'grover', sat_grover: 'sat grover', qpe: 'qpe', vqe: 'vqe' };
+
+function moleculeLabel(name) {
+  return ({ h2: 'H₂', lih: 'LiH', beh2: 'BeH₂' })[name] || name;
+}
+
+function experimentLabel(exp) {
+  const algorithm = ALGO_LABELS[exp.algorithm] || exp.algorithm;
+  const molecule = exp.algorithm === 'vqe' ? exp.result?.molecule : null;
+  return molecule ? `${algorithm} · ${moleculeLabel(molecule)}` : algorithm;
+}
 const STATUS_LABELS = { queued: 'queued', completed: 'completed', failed: 'failed' };
 
 function fmtTime(iso) {
@@ -550,7 +560,7 @@ function renderTable() {
 
   tbody.innerHTML = rows.map(exp => `
     <tr data-id="${exp.id}">
-      <td><span class="algo-tag algo-${exp.algorithm}">${ALGO_LABELS[exp.algorithm] || exp.algorithm}</span></td>
+      <td><span class="algo-tag algo-${exp.algorithm}">${experimentLabel(exp)}</span></td>
       <td>
         <div class="status-cell status-${exp.status}">
           <span class="status-dot"></span>
@@ -573,7 +583,7 @@ function openDetail(id) {
   if (!exp) return;
 
   document.getElementById('detailAlgoTag').outerHTML =
-    `<div class="algo-tag algo-${exp.algorithm}" id="detailAlgoTag">${ALGO_LABELS[exp.algorithm] || exp.algorithm}</div>`;
+    `<div class="algo-tag algo-${exp.algorithm}" id="detailAlgoTag">${experimentLabel(exp)}</div>`;
   document.getElementById('detailId').textContent = exp.id;
 
   let body = `
@@ -584,6 +594,9 @@ function openDetail(id) {
   `;
 
   if (exp.result) {
+    if (exp.algorithm === 'vqe' && exp.result.molecule) {
+      body += `<div class="detail-row"><span class="label">molecule</span><span class="mono">${moleculeLabel(exp.result.molecule)}</span></div>`;
+    }
     body += `<div class="detail-section-title">result</div><pre class="result-json">${JSON.stringify(exp.result, null, 2)}</pre>`;
   }
   if (exp.error) {

@@ -1,78 +1,111 @@
-# quantum-sim
+# Messaging: why the platform uses RabbitMQ and Kafka
 
-A quantum computer simulator with a realistic software stack — modelling the
-hardware/software interaction loops found in real QPU platforms like Alice & Bob.
+The platform has two different messaging problems. Using one broker for both
+would obscure their different delivery and consumption semantics.
 
-## Architecture
+| Concern | RabbitMQ | Kafka |
+|---|---|---|
+| Primary role | Commands and results | Telemetry and derived event streams |
+| Typical message | “Run experiment X once” | “Iteration N took 1.27 s” |
+| Consumption | Competing worker consumes a task | Independent consumer groups replay a log |
+| Completion | Explicit ack removes task from active queue | Offset records consumer progress |
+| Retention | Until acknowledged/expired | Retained by topic policy |
+| Main value | Work distribution and redelivery | Fan-out, replay, stream processing |
 
-```
-┌─────────────────────────────────────────────────────┐
-│                  REST API (FastAPI)                  │
-└────────────────────────┬────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────┐
-│            Experiment Runner (async)                 │
-│         Celery task queue  ·  Redis broker           │
-└───┬────────────────────────────────────────┬─────────┘
-    │                                        │
-┌───▼──────────────────┐    ┌────────────────▼────────┐
-│   Quantum Simulator  │    │    Storage Layer        │
-│  ┌────────────────┐  │    │  ┌──────────────────┐   │
-│  │  QuantumState  │  │    │  │ PostgreSQL        │   │
-│  │  Gates         │  │    │  │ (metadata)        │   │
-│  │  Noise Model   │  │    │  ├──────────────────┤   │
-│  │  Measurement   │  │    │  │ InfluxDB          │   │
-│  └────────────────┘  │    │  │ (timeseries)      │   │
-│  ┌────────────────┐  │    │  ├──────────────────┤   │
-│  │  Algorithms    │  │    │  │ MongoDB           │   │
-│  │  · Grover      │  │    │  │ (tomography)      │   │
-│  │  · QFT         │  │    │  ├──────────────────┤   │
-│  └────────────────┘  │    │  │ MinIO             │   │
-└──────────────────────┘    │  │ (state vectors)   │   │
-                            │  └──────────────────┘   │
-                            └─────────────────────────┘
+## RabbitMQ command path
+
+```text
+POST /experiments
+       |
+       v
+experiments queue
+       |
+       v
+orchestrator worker
+       |
+       v
+experiment-results queue
+       |
+       v
+API result consumer -> ExperimentStore
 ```
 
-## Quickstart
+The API first stores a `queued` experiment and then publishes an
+`ExperimentTask`. The orchestrator executes it and publishes an
+`ExperimentResultMessage`. The API consumes that result and changes the stored
+status to `completed` or `failed`.
 
-```bash
-# 1. Bootstrap venv
-make bootstrap
-source .venv/bin/activate
+RabbitMQ is appropriate because a task should be handled by one worker and
+acknowledged only after a result message has been produced. Malformed messages
+go directly to `experiments.dlq`. Worker-level redelivery is bounded; an
+algorithm or backend failure is instead a valid failed result and is not an
+infinite task retry.
 
-# 2. Start infrastructure
-make up
+## Kafka telemetry path
 
-# 3. Run tests
-make test
+Kafka carries facts that may have several consumers and remain useful after
+their first processing:
 
-# 4. Start API
-uvicorn api.main:app --reload
+- `calibration-results` — backend calibration observations;
+- `calibration-alerts` — derived alert-state changes;
+- `vqe-iteration-metrics` — raw optimizer-iteration telemetry;
+- `vqe-window-metrics` — Faust-derived window aggregates.
+
+The hand-written analytics consumer, Faust, TimescaleDB sink, diagnostic tools,
+and future result-interpreter service can use different consumer groups and
+read the same event independently.
+
+## Planned experiment-completed event
+
+The AI interpretation feature should not consume the RabbitMQ result queue.
+That queue is an API state-update command path, so adding a competing consumer
+could steal messages from the API. Instead, the API or orchestrator will emit a
+separate Kafka event after completion:
+
+```json
+{
+  "schema_version": 1,
+  "experiment_id": "...",
+  "algorithm": "vqe",
+  "completed_at": "...",
+  "result": {"molecule": "h2", "total_energy": -1.14}
+}
 ```
 
-## Infrastructure
+An `experiment-completed` topic gives the interpreter replayability and keeps
+experiment execution independent of the availability or latency of an LLM.
+Interpretation is an eventually consistent enrichment: a completed experiment
+must remain completed even if the LLM provider is unavailable.
 
-| Service    | Port  | Purpose                        |
-|------------|-------|--------------------------------|
-| PostgreSQL | 5432  | Experiment metadata, circuits  |
-| MongoDB    | 27017 | Tomography results, configs    |
-| InfluxDB   | 8086  | Raw measurement timeseries     |
-| MinIO      | 9000  | State vectors, large matrices  |
-| Redis      | 6379  | Celery broker                  |
-| Grafana    | 3000  | Dashboards (admin/qsim_secret) |
+## Message contracts
 
-## Project layout
+RabbitMQ envelopes live in `quantum_core/tasks.py` as framework-neutral
+dataclasses. Kafka events use explicit JSON fields. New durable topics should
+include `schema_version` from their first release; optional additive fields are
+preferred over silent semantic changes.
 
-```
-quantum-sim/
-├── core/               # Simulator kernel (state, gates, noise, measurement)
-├── algorithms/         # Grover, QFT, Shor (partial)
-├── platform/           # Experiment runner, compiler, scheduler
-├── storage/            # Adapters for each storage backend
-├── api/                # FastAPI app
-├── tests/
-│   ├── test_core/
-│   └── test_platform/
-├── infra/              # Grafana provisioning, K8s manifests (later)
-└── scripts/            # bootstrap.sh and other dev helpers
-```
+For VQE, molecule identity, geometry/mapping identifier, qubit count, and the
+energy-history schema are part of the interpretation contract. Without them,
+an agent cannot judge whether an energy is physically reasonable.
+
+## Delivery guarantees and idempotency
+
+The system should assume at-least-once delivery:
+
+- RabbitMQ can redeliver after a worker crash;
+- Kafka consumers can replay after an offset rollback or a failure between a
+  database write and offset commit;
+- Faust table updates are not automatically atomic with unrelated external
+  database writes.
+
+Consumers therefore use stable keys and idempotent writes. The planned
+interpretation record should be unique on `(experiment_id, interpreter_version)`
+and written with an upsert. Reprocessing an event must update the same record,
+not create duplicate summaries or vectors.
+
+## Operational separation
+
+RabbitMQ queue depth indicates unprocessed work. Kafka consumer lag indicates
+how far a stream processor is behind the retained log. They are not
+interchangeable health signals and are exposed separately through Prometheus
+and Grafana.

@@ -41,12 +41,13 @@ from dataclasses import dataclass, field
 from scipy.optimize import minimize
 
 from quantum_core.algorithms.vqe import (
-    H2_HAMILTONIAN,
-    H2_NUCLEAR_REPULSION,
+    DEFAULT_ANSATZ,
+    Ansatz,
     build_measurement_circuit,
     pauli_expectation_from_counts,
 )
 from quantum_core.backends.base import Circuit, QuantumBackend
+from quantum_core.chemistry.molecules import H2, MolecularHamiltonian
 from quantum_core.sync.polling import PollingConfig, PollingMetrics, wait_for_result
 
 
@@ -94,6 +95,8 @@ async def evaluate_energy(
     shots: int = 8192,
     polling_config: PollingConfig | None = None,
     metrics: VQEIterationMetrics | None = None,
+    molecule: MolecularHamiltonian = H2,
+    ansatz: Ansatz = DEFAULT_ANSATZ,
 ) -> float:
     """One classical-quantum round trip: submits one circuit per
     non-identity Hamiltonian term, waits for each via the standard hw/sw
@@ -116,15 +119,15 @@ async def evaluate_energy(
     from outside `wait_for_result` at all.
     """
     total = 0.0
-    for term in H2_HAMILTONIAN:
+    for term in molecule.terms:
         if not term.qubits:
             total += term.coefficient  # identity term, no circuit needed
             continue
 
-        qc = build_measurement_circuit(params, term)
+        qc = build_measurement_circuit(params, term, molecule=molecule, ansatz=ansatz)
         circuit = Circuit(
             name=f"vqe-term-{''.join(f'{q}{p}' for q, p in term.qubits.items())}",
-            num_qubits=2,
+            num_qubits=molecule.num_qubits,
             payload=qc,
             shots=shots,
         )
@@ -154,12 +157,17 @@ def run_vqe(
     initial_params: list[float] | None = None,
     shots: int = 8192,
     max_iterations: int = 100,
+    molecule: MolecularHamiltonian = H2,
+    ansatz: Ansatz = DEFAULT_ANSATZ,
 ) -> VQEResult:
     """Runs the full VQE feedback loop. Must be called from a plain
     synchronous context (see module docstring for why) -- e.g. directly
     from `if __name__ == "__main__":`, not from inside `asyncio.run(...)`.
     """
-    params0 = initial_params or [0.0, 0.0, 0.0, 0.0]
+    expected_params = ansatz.parameter_count(molecule.num_qubits)
+    params0 = initial_params if initial_params is not None else [0.0] * expected_params
+    if len(params0) != expected_params:
+        raise ValueError(f"expected {expected_params} initial parameters, got {len(params0)}")
     history: list[VQEIterationLog] = []
     iteration_counter = 0
 
@@ -170,7 +178,14 @@ def run_vqe(
         iter_start = time.monotonic()
         iter_metrics = VQEIterationMetrics()
         energy = asyncio.run(
-            evaluate_energy(backend, list(params), shots=shots, metrics=iter_metrics)
+            evaluate_energy(
+                backend,
+                list(params),
+                shots=shots,
+                metrics=iter_metrics,
+                molecule=molecule,
+                ansatz=ansatz,
+            )
         )
         iter_wall_time_s = time.monotonic() - iter_start
 
@@ -201,6 +216,6 @@ def run_vqe(
     return VQEResult(
         optimal_params=list(res.x),
         electronic_energy=res.fun,
-        total_energy=res.fun + H2_NUCLEAR_REPULSION,
+        total_energy=res.fun + molecule.nuclear_repulsion,
         history=history,
     )

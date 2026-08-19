@@ -85,3 +85,9 @@ def test_vqe_max_iterations_below_minimum_returns_422(client: TestClient) -> Non
     response = client.post("/experiments", json={"algorithm": "vqe", "max_iterations": 0})
 
     assert response.status_code == 422
+
+
+def test_vqe_unavailable_molecule_returns_422(client: TestClient) -> None:
+    response = client.post("/experiments", json={"algorithm": "vqe", "molecule": "lih"})
+
+    assert response.status_code == 422

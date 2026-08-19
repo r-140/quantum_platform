@@ -13,8 +13,8 @@ dependencies = [
     "scipy>=1.14",
 ]
 
-[tool.setuptools]
-packages = ["quantum_core"]
+[tool.setuptools.packages.find]
+include = ["quantum_core*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

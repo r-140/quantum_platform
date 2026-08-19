@@ -99,7 +99,11 @@ def test_vqe_submit_params_shape(client: TestClient, monkeypatch: pytest.MonkeyP
 
     assert response.status_code == 202
     assert response.json()["status"] == "queued"
-    assert published_tasks[0].params == {"shots": 8192, "max_iterations": 80}
+    assert published_tasks[0].params == {
+        "molecule": "h2",
+        "shots": 8192,
+        "max_iterations": 80,
+    }
 
 
 def test_enqueue_failure_becomes_failed_not_500(

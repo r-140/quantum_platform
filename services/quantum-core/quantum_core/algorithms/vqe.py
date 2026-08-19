@@ -26,8 +26,11 @@ under classical (noiseless) optimization.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from qiskit import QuantumCircuit
+
+from quantum_core.chemistry.molecules import H2, MolecularHamiltonian, PauliTerm
 
 # g0..g5, O'Malley et al. Table 1, H2 at R=0.75 Angstrom.
 H2_COEFFICIENTS = {
@@ -38,20 +41,8 @@ H2_COEFFICIENTS = {
     "Y0Y1": 0.0910,
     "X0X1": 0.0910,
 }
-H2_NUCLEAR_REPULSION = 0.7055696146  # Hartree, R=0.75 Angstrom
-H2_LITERATURE_GROUND_ENERGY = -1.137  # Hartree, approximate, for sanity checks
-
-
-@dataclass(frozen=True)
-class PauliTerm:
-    """One term of the Hamiltonian: `coefficient` * product of Pauli
-    operators named in `qubits` (e.g. {0: 'Z', 1: 'Z'} for Z0Z1). An empty
-    `qubits` dict represents the identity term -- it contributes a constant
-    energy shift and needs no quantum circuit at all.
-    """
-
-    coefficient: float
-    qubits: dict[int, str]
+H2_NUCLEAR_REPULSION = H2.nuclear_repulsion
+H2_LITERATURE_GROUND_ENERGY = H2.reference_ground_energy
 
 
 H2_HAMILTONIAN: list[PauliTerm] = [
@@ -62,6 +53,42 @@ H2_HAMILTONIAN: list[PauliTerm] = [
     PauliTerm(H2_COEFFICIENTS["Y0Y1"], {0: "Y", 1: "Y"}),
     PauliTerm(H2_COEFFICIENTS["X0X1"], {0: "X", 1: "X"}),
 ]
+
+
+class Ansatz(Protocol):
+    """Circuit-building strategy used independently of molecule data."""
+
+    def parameter_count(self, num_qubits: int) -> int: ...
+
+    def build(self, num_qubits: int, params: list[float]) -> QuantumCircuit: ...
+
+
+@dataclass(frozen=True)
+class HardwareEfficientAnsatz:
+    """Two RY layers separated by a nearest-neighbour CX chain."""
+
+    def parameter_count(self, num_qubits: int) -> int:
+        if num_qubits < 1:
+            raise ValueError("num_qubits must be positive")
+        return 2 * num_qubits
+
+    def build(self, num_qubits: int, params: list[float]) -> QuantumCircuit:
+        expected = self.parameter_count(num_qubits)
+        if len(params) != expected:
+            raise ValueError(f"expected {expected} parameters, got {len(params)}")
+
+        qc = QuantumCircuit(num_qubits, name=f"{num_qubits}q-hardware-efficient-ansatz")
+        for qubit in range(num_qubits):
+            qc.ry(params[qubit], qubit)
+        # Descending direction preserves the original H2 circuit: cx(1, 0).
+        for control in range(num_qubits - 1, 0, -1):
+            qc.cx(control, control - 1)
+        for qubit in range(num_qubits):
+            qc.ry(params[num_qubits + qubit], qubit)
+        return qc
+
+
+DEFAULT_ANSATZ = HardwareEfficientAnsatz()
 
 
 def build_ansatz(params: list[float]) -> QuantumCircuit:
@@ -79,18 +106,16 @@ def build_ansatz(params: list[float]) -> QuantumCircuit:
     enough to reach the exact ground state of the H2 Hamiltonian above --
     see docs/algorithms/vqe.md.
     """
-    if len(params) != 4:
-        raise ValueError(f"expected 4 parameters, got {len(params)}")
-    qc = QuantumCircuit(2, name="h2-ansatz")
-    qc.ry(params[0], 0)
-    qc.ry(params[1], 1)
-    qc.cx(1, 0)
-    qc.ry(params[2], 0)
-    qc.ry(params[3], 1)
-    return qc
+    return DEFAULT_ANSATZ.build(H2.num_qubits, params)
 
 
-def build_measurement_circuit(params: list[float], term: PauliTerm) -> QuantumCircuit:
+def build_measurement_circuit(
+    params: list[float],
+    term: PauliTerm,
+    *,
+    molecule: MolecularHamiltonian = H2,
+    ansatz: Ansatz = DEFAULT_ANSATZ,
+) -> QuantumCircuit:
     """Ansatz + basis-rotation gates for `term`'s Pauli factors + full
     measurement. Basis rotations (verified independently, see
     docs/algorithms/vqe.md): X -> H; Y -> Sdg then H; Z -> no rotation.
@@ -102,7 +127,7 @@ def build_measurement_circuit(params: list[float], term: PauliTerm) -> QuantumCi
     if not term.qubits:
         raise ValueError("identity term needs no measurement circuit -- special-case it")
 
-    qc = build_ansatz(params)
+    qc = ansatz.build(molecule.num_qubits, params)
     for qubit, pauli in term.qubits.items():
         if pauli == "X":
             qc.h(qubit)
