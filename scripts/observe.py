@@ -158,6 +158,13 @@ async def load_generator(
             )
             label = f"vqe/{selected_molecule}" if selected_molecule else algorithm
             logger.info("[submit] %s id=%s", label, body["id"])
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "[submit] failed for %s: HTTP %s response=%s",
+                algorithm,
+                exc.response.status_code,
+                exc.response.text,
+            )
         except httpx.HTTPError as exc:
             logger.error("[submit] failed for %s: %s", algorithm, exc)
 

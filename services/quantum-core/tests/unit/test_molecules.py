@@ -33,6 +33,25 @@ def test_molecule_rejects_term_outside_register() -> None:
         )
 
 
-def test_unverified_planned_molecule_fails_clearly() -> None:
-    with pytest.raises(ValueError, match="not been registered"):
-        get_molecule("lih")
+def test_unknown_molecule_fails_clearly() -> None:
+    with pytest.raises(ValueError, match="unknown molecule"):
+        get_molecule("water")
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_qubits"),
+    [("lih", 4), ("beh2", 6)],
+)
+def test_generated_molecule_is_finite_and_self_consistent(
+    name: str, expected_qubits: int
+) -> None:
+    molecule = get_molecule(name)
+
+    assert molecule.num_qubits == expected_qubits
+    assert len(molecule.terms) > 6
+    assert len(molecule.initial_state) == expected_qubits
+    assert molecule.reference_ground_energy is not None
+    assert any(not term.qubits for term in molecule.terms)
+    assert molecule.total_energy_offset == pytest.approx(
+        molecule.nuclear_repulsion + molecule.inactive_energy
+    )

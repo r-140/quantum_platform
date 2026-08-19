@@ -60,7 +60,12 @@ class Ansatz(Protocol):
 
     def parameter_count(self, num_qubits: int) -> int: ...
 
-    def build(self, num_qubits: int, params: list[float]) -> QuantumCircuit: ...
+    def build(
+        self,
+        num_qubits: int,
+        params: list[float],
+        initial_state: tuple[bool, ...] = (),
+    ) -> QuantumCircuit: ...
 
 
 @dataclass(frozen=True)
@@ -72,12 +77,20 @@ class HardwareEfficientAnsatz:
             raise ValueError("num_qubits must be positive")
         return 2 * num_qubits
 
-    def build(self, num_qubits: int, params: list[float]) -> QuantumCircuit:
+    def build(
+        self,
+        num_qubits: int,
+        params: list[float],
+        initial_state: tuple[bool, ...] = (),
+    ) -> QuantumCircuit:
         expected = self.parameter_count(num_qubits)
         if len(params) != expected:
             raise ValueError(f"expected {expected} parameters, got {len(params)}")
 
         qc = QuantumCircuit(num_qubits, name=f"{num_qubits}q-hardware-efficient-ansatz")
+        for qubit, occupied in enumerate(initial_state):
+            if occupied:
+                qc.x(qubit)
         for qubit in range(num_qubits):
             qc.ry(params[qubit], qubit)
         # Descending direction preserves the original H2 circuit: cx(1, 0).
@@ -127,7 +140,7 @@ def build_measurement_circuit(
     if not term.qubits:
         raise ValueError("identity term needs no measurement circuit -- special-case it")
 
-    qc = ansatz.build(molecule.num_qubits, params)
+    qc = ansatz.build(molecule.num_qubits, params, molecule.initial_state)
     for qubit, pauli in term.qubits.items():
         if pauli == "X":
             qc.h(qubit)

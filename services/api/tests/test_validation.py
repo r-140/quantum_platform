@@ -87,7 +87,31 @@ def test_vqe_max_iterations_below_minimum_returns_422(client: TestClient) -> Non
     assert response.status_code == 422
 
 
-def test_vqe_unavailable_molecule_returns_422(client: TestClient) -> None:
-    response = client.post("/experiments", json={"algorithm": "vqe", "molecule": "lih"})
+def test_vqe_unknown_molecule_returns_422(client: TestClient) -> None:
+    response = client.post("/experiments", json={"algorithm": "vqe", "molecule": "water"})
 
     assert response.status_code == 422
+
+
+def test_vqe_lih_is_accepted(client: TestClient, monkeypatch) -> None:
+    from app import deps
+
+    async def fake_publish_task(task):
+        pass
+
+    monkeypatch.setattr(deps, "publish_task", fake_publish_task)
+    response = client.post("/experiments", json={"algorithm": "vqe", "molecule": "lih"})
+
+    assert response.status_code == 202
+
+
+def test_vqe_beh2_is_accepted(client: TestClient, monkeypatch) -> None:
+    from app import deps
+
+    async def fake_publish_task(task):
+        pass
+
+    monkeypatch.setattr(deps, "publish_task", fake_publish_task)
+    response = client.post("/experiments", json={"algorithm": "vqe", "molecule": "beh2"})
+
+    assert response.status_code == 202

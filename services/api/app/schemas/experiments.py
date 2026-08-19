@@ -72,9 +72,9 @@ class VQERequest(BaseModel):
     """
 
     algorithm: Literal["vqe"] = "vqe"
-    molecule: Literal["h2"] = Field(
+    molecule: Literal["h2", "lih", "beh2"] = Field(
         default="h2",
-        description="Molecular Hamiltonian to evaluate. LiH and BeH2 are enabled after their coefficients are independently verified.",
+        description="Molecular Hamiltonian to evaluate.",
     )
     shots: int = Field(default=8192, gt=0, le=100_000)
     max_iterations: int = Field(default=80, gt=0, le=1000)

@@ -216,6 +216,6 @@ def run_vqe(
     return VQEResult(
         optimal_params=list(res.x),
         electronic_energy=res.fun,
-        total_energy=res.fun + molecule.nuclear_repulsion,
+        total_energy=res.fun + molecule.total_energy_offset,
         history=history,
     )
