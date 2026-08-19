@@ -9,7 +9,7 @@ committed specification and verified before `lih` is enabled in the API.
 
 Neutral LiH contains four electrons. In the Born–Oppenheimer approximation,
 
-\[
+$$
 \hat H_\mathrm{elec}=
 \sum_i\left(-\frac12\nabla_i^2
 -\frac{3}{|\mathbf r_i-\mathbf R_\mathrm{Li}|}
