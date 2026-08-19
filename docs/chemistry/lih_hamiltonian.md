@@ -14,7 +14,7 @@ $$
 \sum_i\left(-\frac12\nabla_i^2
 -\frac{3}{|\mathbf r_i-\mathbf R_\mathrm{Li}|}
 -\frac{1}{|\mathbf r_i-\mathbf R_\mathrm H|}\right)
-+\sum_{i<j}\frac1{r_{ij}},
++\sum_{i \lt j}\frac1{r_{ij}},
 $$
 
 and

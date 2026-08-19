@@ -14,8 +14,8 @@ $$
 -\sum_A \frac{\nabla_A^2}{2M_A}
 -\sum_i \frac{\nabla_i^2}{2}
 -\sum_{iA}\frac{Z_A}{|\mathbf r_i-\mathbf R_A|}
-+\sum_{i<j}\frac{1}{r_{ij}}
-+\sum_{A<B}\frac{Z_AZ_B}{R_{AB}}.
++\sum_{i \lt j}\frac{1}{r_{ij}}
++\sum_{A \lt B}\frac{Z_AZ_B}{R_{AB}}.
 $$
 
 The Born–Oppenheimer approximation fixes the nuclei at positions

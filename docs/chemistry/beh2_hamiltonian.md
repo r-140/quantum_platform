@@ -20,7 +20,7 @@ $$
 \sum_i\left(-\frac12\nabla_i^2
 -\frac4{|\mathbf r_i-\mathbf R_\mathrm{Be}|}
 -\sum_{A=1}^{2}\frac1{|\mathbf r_i-\mathbf R_{\mathrm H_A}|}\right)
-+\sum_{i<j}\frac1{r_{ij}},
++\sum_{i \lt j}\frac1{r_{ij}},
 $$
 
 and the nuclear scalar is
