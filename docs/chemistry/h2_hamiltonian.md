@@ -2,40 +2,40 @@
 
 This document explains how the non-relativistic molecular problem becomes the
 two-qubit Pauli Hamiltonian used by this project. Energies are in Hartree and
-the internuclear distance is (R=0.75\,\text{Å}), unless stated otherwise.
+the internuclear distance is $R=0.75\,\text{Å}$, unless stated otherwise.
 
 ## 1. Molecular Schrödinger equation
 
 For two nuclei and two electrons, neglecting relativistic and radiative
 effects, the laboratory-frame Hamiltonian is
 
-\[
+$$
 \hat H =
 -\sum_A \frac{\nabla_A^2}{2M_A}
 -\sum_i \frac{\nabla_i^2}{2}
 -\sum_{iA}\frac{Z_A}{|\mathbf r_i-\mathbf R_A|}
 +\sum_{i<j}\frac{1}{r_{ij}}
 +\sum_{A<B}\frac{Z_AZ_B}{R_{AB}}.
-\]
+$$
 
 The Born–Oppenheimer approximation fixes the nuclei at positions
-\(\mathbf R_A\). Their kinetic term disappears, and the nuclear repulsion is a
+$\mathbf R_A$. Their kinetic term disappears, and the nuclear repulsion is a
 geometry-dependent scalar:
 
-\[
+$$
 E_\mathrm{nuc}(R)=\frac{Z_1Z_2}{R}.
-\]
+$$
 
 The electronic eigenproblem is therefore
 
-\[
+$$
 \hat H_\mathrm{elec}(R)|\Psi_k(R)\rangle
 =E_{k,\mathrm{elec}}(R)|\Psi_k(R)\rangle,
 \qquad
 E_k(R)=E_{k,\mathrm{elec}}(R)+E_\mathrm{nuc}(R).
-\]
+$$
 
-For the model used here, (E_\mathrm{nuc}=0.7055696146\) Ha. Keeping this
+For the model used here, $E_\mathrm{nuc}=0.7055696146$ Ha. Keeping this
 constant separate is important: the measured qubit Hamiltonian estimates the
 electronic energy, while the reported molecular energy adds nuclear repulsion.
 
@@ -44,34 +44,34 @@ electronic energy, while the reported molecular energy adds nuclear repulsion.
 The exact electronic wavefunction lives in an infinite-dimensional Hilbert
 space. A quantum-chemistry calculation first chooses spatial basis functions
 and constructs molecular spin orbitals. In a minimal basis, H₂ has two spatial
-molecular orbitals, bonding \(\sigma_g\) and antibonding \(\sigma_u^*\), each
-with spin \(\alpha\) or \(\beta\): four spin orbitals in total.
+molecular orbitals, bonding $\sigma_g$ and antibonding $\sigma_u^*$, each
+with spin $\alpha$ or $\beta$: four spin orbitals in total.
 
-After choosing orthonormal spin orbitals \(\{\chi_p\}\), the electronic
+After choosing orthonormal spin orbitals $\{\chi_p\}$, the electronic
 Hamiltonian is written in second quantization:
 
-\[
+$$
 \hat H_\mathrm{elec}
 =\sum_{pq}h_{pq}a_p^\dagger a_q
 +\frac12\sum_{pqrs}h_{pqrs}a_p^\dagger a_q^\dagger a_s a_r.
-\]
+$$
 
 The one-electron integrals contain kinetic energy and electron–nuclear
 attraction,
 
-\[
+$$
 h_{pq}=\int \chi_p^*(x)
 \left(-\frac12\nabla^2-\sum_A\frac{Z_A}{r_A}\right)
 \chi_q(x)\,dx,
-\]
+$$
 
 and the two-electron integrals contain Coulomb repulsion,
 
-\[
+$$
 h_{pqrs}=\iint
 \frac{\chi_p^*(x_1)\chi_q^*(x_2)
 \chi_r(x_1)\chi_s(x_2)}{r_{12}}\,dx_1dx_2.
-\]
+$$
 
 This basis truncation is the first major approximation. A VQE can solve the
 chosen finite-basis Hamiltonian accurately while still differing from the
@@ -95,21 +95,21 @@ sector; basis truncation and rounded coefficients are not.
 
 The reduced electronic Hamiltonian is
 
-\[
+$$
 \hat H_\mathrm{elec}=
 g_0 I+g_1Z_0+g_2Z_1+g_3Z_0Z_1+g_4Y_0Y_1+g_5X_0X_1,
-\]
+$$
 
 with
 
 | coefficient | value (Ha) | operator |
 |---|---:|---|
-| \(g_0\) | -0.4804 | \(I\) |
-| \(g_1\) | +0.3435 | \(Z_0\) |
-| \(g_2\) | -0.4347 | \(Z_1\) |
-| \(g_3\) | +0.5716 | \(Z_0Z_1\) |
-| \(g_4\) | +0.0910 | \(Y_0Y_1\) |
-| \(g_5\) | +0.0910 | \(X_0X_1\) |
+| $g_0$ | -0.4804 | $I$ |
+| $g_1$ | +0.3435 | $Z_0$ |
+| $g_2$ | -0.4347 | $Z_1$ |
+| $g_3$ | +0.5716 | $Z_0Z_1$ |
+| $g_4$ | +0.0910 | $Y_0Y_1$ |
+| $g_5$ | +0.0910 | $X_0X_1$ |
 
 The numbers are from O’Malley et al., *Scalable Quantum Simulation of
 Molecular Energies*, Phys. Rev. X 6, 031007 (2016), Table I. They are rounded
@@ -117,13 +117,13 @@ to four decimal places in the source/project.
 
 Using
 
-\[
+$$
 X=\begin{pmatrix}0&1\\1&0\end{pmatrix},\quad
 Y=\begin{pmatrix}0&-i\\i&0\end{pmatrix},\quad
 Z=\begin{pmatrix}1&0\\0&-1\end{pmatrix},
-\]
+$$
 
-the complete (4\times4\) matrix is formed with Kronecker products. Direct
+the complete $4\times4$ matrix is formed with Kronecker products. Direct
 diagonalization gives electronic eigenvalues approximately
 
 ```text
@@ -132,37 +132,37 @@ diagonalization gives electronic eigenvalues approximately
 
 and the lowest total energy is
 
-\[
+$$
 -1.851199+0.7055696146=-1.145630\ \mathrm{Ha}.
-\]
+$$
 
-The cited physical value is about (-1.137\) Ha. The residual is consistent
+The cited physical value is about $-1.137$ Ha. The residual is consistent
 with the deliberately low-precision coefficient table and small geometry/model
 differences; this model is not a high-accuracy ab-initio calculation.
 
 ## 5. Why Pauli terms are measurable
 
-For a trial state \(|\psi(\theta)\rangle\), VQE evaluates
+For a trial state $|\psi(\theta)\rangle$, VQE evaluates
 
-\[
+$$
 E(\theta)=\sum_jg_j\langle\psi(\theta)|P_j|\psi(\theta)\rangle.
-\]
+$$
 
 Hardware measures in the computational, or Z, basis. Each Pauli product is
 converted to that basis before measurement:
 
-- (Z\): no rotation;
-- (X\): apply (H\);
-- (Y\): apply (S^\dagger\), then (H\).
+- $Z$: no rotation;
+- $X$: apply $H$;
+- $Y$: apply $S^\dagger$, then $H$.
 
 For a measured bitstring, the eigenvalue of a Pauli product is the product of
-\((-1)^{b_q}\) over qubits on which the term acts. Averaging this sign over
-shots estimates \(\langle P_j\rangle\). The identity contributes (g_0\)
+$(-1)^{b_q}$ over qubits on which the term acts. Averaging this sign over
+shots estimates $\langle P_j\rangle$. The identity contributes $g_0$
 without a circuit.
 
 The project verified the basis rotations and sign convention independently by
 comparing measurement-derived expectations with direct
-\(\langle\psi|H|\psi\rangle\) matrix evaluation for random parameters.
+$\langle\psi|H|\psi\rangle$ matrix evaluation for random parameters.
 
 ## 6. Ansatz and variational space
 

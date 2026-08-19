@@ -15,25 +15,25 @@ H ---- Be ---- H
 
 with equal Be–H distances. In the Born–Oppenheimer approximation,
 
-\[
+$$
 \hat H_\mathrm{elec}=
 \sum_i\left(-\frac12\nabla_i^2
 -\frac4{|\mathbf r_i-\mathbf R_\mathrm{Be}|}
 -\sum_{A=1}^{2}\frac1{|\mathbf r_i-\mathbf R_{\mathrm H_A}|}\right)
 +\sum_{i<j}\frac1{r_{ij}},
-\]
+$$
 
 and the nuclear scalar is
 
-\[
+$$
 E_\mathrm{nuc}=
 \frac4{R_{\mathrm{BeH}_1}}+
 \frac4{R_{\mathrm{BeH}_2}}+
 \frac1{R_{\mathrm H_1\mathrm H_2}}.
-\]
+$$
 
-For a symmetric linear geometry with Be–H distance (R\), the H–H distance is
-\(2R\), hence (E_\mathrm{nuc}=8/R+1/(2R)\) in atomic units.
+For a symmetric linear geometry with Be–H distance $R$, the H–H distance is
+$2R$, hence $E_\mathrm{nuc}=8/R+1/(2R)$ in atomic units.
 
 ## 2. Orbitals and frozen core
 
@@ -56,20 +56,20 @@ compact encoding and symmetry reduction.
 
 After RHF and active-space transformation,
 
-\[
+$$
 \hat H_\mathrm{active}=
 E_0+\sum_{pq\in A}\tilde h_{pq}a_p^\dagger a_q
 +\frac12\sum_{pqrs\in A}h_{pqrs}
 a_p^\dagger a_q^\dagger a_s a_r.
-\]
+$$
 
 A fermion-to-qubit mapping produces
 
-\[
+$$
 \hat H_q=\sum_{j=1}^{N_P}c_jP_j.
-\]
+$$
 
-For BeH₂, (N_P\) is operationally important. The current VQE evaluator
+For BeH₂, $N_P$ is operationally important. The current VQE evaluator
 submits one circuit for every non-identity Pauli term on every optimizer
 evaluation. A hundred terms and eighty optimizer evaluations imply roughly
 eight thousand circuit submissions before retries. Commuting-term grouping is
@@ -81,14 +81,14 @@ The initial project model should be intentionally small but fully specified:
 
 | Setting | Proposed value |
 |---|---|
-| Geometry | linear H–Be–H, equal (R_\mathrm{BeH}=1.3\,\text{Å}) |
+| Geometry | linear H–Be–H, equal $R_\mathrm{BeH}=1.3\,\text{Å}$ |
 | Charge / multiplicity | 0 / singlet |
 | Orbital basis | STO-3G |
 | Mean field | RHF |
 | Frozen core | Be 1s pair |
 | Active space | four valence electrons in explicitly recorded orbitals |
 | Mapping | parity or Bravyi–Kitaev; fixed project-wide |
-| Reduction | (\mathbb Z_2\) tapering with recorded sector |
+| Reduction | $\mathbb Z_2$ tapering with recorded sector |
 
 The distance is a proposed demonstration geometry. It must be treated as part
 of the model identifier, not as a universal equilibrium constant.
@@ -101,7 +101,7 @@ quantum circuit. It must at least preserve or track:
 
 - total electron number;
 - spin projection/parity;
-- the (\mathbb Z_2\) eigenvalues used for tapering;
+- the $\mathbb Z_2$ eigenvalues used for tapering;
 - orbital ordering before and after tapering.
 
 The Hartree–Fock bitstring should be generated from the same electronic-
@@ -115,7 +115,7 @@ but it does not guarantee useful convergence. Verification should compare
 several depths and a chemistry-informed reference. Useful measurements include:
 
 - best and final energy error relative to exact diagonalization;
-- variance (\langle H^2\rangle-\langle H\rangle^2\), when affordable;
+- variance $\langle H^2\rangle-\langle H\rangle^2$, when affordable;
 - sensitivity to initial parameters;
 - circuit depth and two-qubit gate count;
 - number of Pauli measurement groups rather than only raw term count.

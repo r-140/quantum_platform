@@ -15,18 +15,18 @@ $$
 -\frac{3}{|\mathbf r_i-\mathbf R_\mathrm{Li}|}
 -\frac{1}{|\mathbf r_i-\mathbf R_\mathrm H|}\right)
 +\sum_{i<j}\frac1{r_{ij}},
-\]
+$$
 
 and
 
-\[
+$$
 E_\mathrm{nuc}=\frac{3}{R_\mathrm{LiH}}.
-\]
+$$
 
 Compared with H₂, LiH introduces a chemically inert, tightly bound Li 1s core
 pair and valence orbitals with unequal atomic energies. The bond is polar; the
 ground state has appreciable ionic character, often described schematically as
-\(\mathrm{Li}^{\delta+}\mathrm H^{\delta-}\).
+$\mathrm{Li}^{\delta+}\mathrm H^{\delta-}$.
 
 ## 2. Basis and active space
 
@@ -51,15 +51,15 @@ different Hamiltonians and different reference energies.
 After a restricted Hartree–Fock calculation and transformation from atomic to
 molecular orbitals,
 
-\[
+$$
 \hat H_\mathrm{active}=
 E_\mathrm{inactive}
 +\sum_{pq\in A}\tilde h_{pq}a_p^\dagger a_q
 +\frac12\sum_{pqrs\in A}h_{pqrs}
 a_p^\dagger a_q^\dagger a_s a_r,
-\]
+$$
 
-where (A\) is the selected active orbital set. (E_\mathrm{inactive}\)
+where $A$ is the selected active orbital set. $E_\mathrm{inactive}$
 contains the nuclear repulsion and frozen-core contribution according to the
 chosen library convention. The implementation must record whether this scalar
 is already included in the qubit operator to prevent double counting.
@@ -68,13 +68,13 @@ is already included in the qubit operator to prevent double counting.
 
 The fermionic operator is mapped to
 
-\[
+$$
 \hat H_q=\sum_j c_jP_j,
 \qquad P_j\in\{I,X,Y,Z\}^{\otimes n}.
-\]
+$$
 
 The first implementation should use one explicitly versioned pipeline—for
-example parity or Bravyi–Kitaev mapping followed by (\mathbb Z_2\) symmetry
+example parity or Bravyi–Kitaev mapping followed by $\mathbb Z_2$ symmetry
 tapering. Particle-number parity and spin parity can often remove qubits, but
 the tapering eigenvalues must be derived from the Hartree–Fock reference state,
 not guessed.
@@ -91,21 +91,21 @@ artifact before becoming a project constant:
 
 | Setting | Proposed value |
 |---|---|
-| Geometry | Li–H, (R=1.6\,\text{Å}) |
+| Geometry | Li–H, $R=1.6\,\text{Å}$ |
 | Charge / multiplicity | 0 / singlet |
 | Orbital basis | STO-3G |
 | Mean field | RHF |
 | Frozen core | Li 1s pair |
 | Active space | explicitly selected valence orbitals; record indices |
 | Mapping | parity or Bravyi–Kitaev; choose one and freeze it |
-| Reduction | (\mathbb Z_2\) tapering with recorded sector |
+| Reduction | $\mathbb Z_2$ tapering with recorded sector |
 
 The bond length is a convenient near-equilibrium demonstration point, not a
 claim that every LiH reference uses exactly this geometry.
 
 ## 6. Ansatz implications
 
-The generic two-RY-layer ansatz now scales its parameter count as (2n\), but
+The generic two-RY-layer ansatz now scales its parameter count as $2n$, but
 syntactic scaling does not prove chemical expressibility. LiH verification
 must compare at least:
 
@@ -116,7 +116,7 @@ must compare at least:
   excitation ansatz.
 
 Starting from all-zero parameters also starts from
-\(|0\ldots0\rangle\), not necessarily the Hartree–Fock occupation state. The
+$|0\ldots0\rangle$, not necessarily the Hartree–Fock occupation state. The
 larger-molecule implementation should explicitly prepare the tapered
 Hartree–Fock reference before applying variational layers.
 
