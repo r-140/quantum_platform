@@ -1,5 +1,39 @@
 # scripts
 
+## `validate_vector_search.py`
+
+Runs a dependency-free end-to-end smoke test of semantic experiment search.
+With the full stack already running, execute:
+
+```bash
+python3 scripts/validate_vector_search.py
+```
+
+The script submits two equivalent Grover experiments and one distinct run,
+waits for the orchestrator to finish them, waits for `result-indexer` to consume
+their Kafka events, and verifies that pgvector returns the duplicate as a
+neighbour with a valid cosine similarity. This exercises the complete path,
+not only the database schema. It exits `0` on success and `1` on failure, so it
+can also be used in CI or a shell pipeline.
+
+Useful options:
+
+```bash
+python3 scripts/validate_vector_search.py --timeout 180
+python3 scripts/validate_vector_search.py --api-url http://localhost:8000
+python3 scripts/validate_vector_search.py --minimum-similarity 0.85
+python3 scripts/validate_vector_search.py --algorithm sat_grover
+python3 scripts/validate_vector_search.py --algorithm qpe
+python3 scripts/validate_vector_search.py --algorithm vqe --vqe-molecule lih
+```
+
+Supported algorithms are `grover` (default), `sat_grover`, `qpe`, and `vqe`.
+VQE defaults to three optimizer iterations and a 600-second timeout because it
+is much slower. Tune it with `--vqe-molecule`, `--vqe-max-iterations`,
+`--shots`, and `--timeout`. The default VQE similarity threshold is lower
+(`0.75`) because shot noise and optimizer trajectories can differ between two
+otherwise identical runs; other algorithms default to `0.90`.
+
 ## `observe.py`
 
 Generates load via experiments through the API, tracks their statuses,

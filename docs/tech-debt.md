@@ -49,6 +49,19 @@ one specific service.
   and whether to use structured output (Claude supports a JSON schema
   via tool use) for a reliably parseable response.
 
+  **Vector database ✅ Done** — PostgreSQL now runs with pgvector and stores
+  a rebuildable semantic projection in `experiment_embeddings`. The API
+  publishes committed results to the replayable `experiment-completed` Kafka
+  topic; `result-indexer` creates algorithm-specific canonical text, embeds it
+  locally with `all-MiniLM-L6-v2`, and upserts the vector. Semantic neighbours
+  are exposed through `GET /experiments/{id}/similar`. See
+  `docs/architecture/vector-search.md`.
+
+  **AI interpretation still open** — the future LLM service can retrieve these
+  neighbours as evidence, generate structured interpretations, and persist
+  them separately from the source result. Model/provider selection, prompt
+  contracts, provenance and evaluation remain to be designed.
+
 - **VQE metrics for the hw/sw interaction loop** (already under
   discussion at the time this item was written) — instrument
   `vqe_loop.py`: quantum vs. classical (COBYLA) time per iteration,
@@ -87,7 +100,7 @@ one specific service.
   (`140` rows in both `vqe_iteration_metrics` and
   `vqe_window_metrics` during the initial end-to-end run).
 
-- **LiH/BeH₂ + an OOP refactor of the molecule code** — extend VQE from
+- **LiH/BeH₂ + an OOP refactor of the molecule code ✅ Done** — extend VQE from
   H₂ to larger molecules; an abstract `Molecule`/`MolecularHamiltonian`,
   concrete subclasses per molecule, an ansatz parameterized by qubit
   count. The Hamiltonian coefficients will need to be re-verified

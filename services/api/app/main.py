@@ -17,6 +17,7 @@ the experiments dashboard at http://localhost:8000/dashboard/, or:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -27,8 +28,9 @@ from fastapi.staticfiles import StaticFiles
 
 from app.db import close_db, init_db
 from app.deps import close_rabbitmq, get_rabbitmq_channel, get_store, init_rabbitmq, utcnow
-from app.routers import backends, experiments
-from app.schemas.experiments import ExperimentStatus
+from app.kafka import close_kafka, init_kafka, publish_completed_experiment
+from app.routers import backends, experiments, similarity
+from app.schemas.experiments import ExperimentResponse, ExperimentStatus
 from app.store.base import ExperimentStore
 from quantum_core.tasks import RESULTS_QUEUE_NAME, ExperimentResultMessage
 
@@ -48,7 +50,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
-async def apply_result_message(result_msg: ExperimentResultMessage, store: ExperimentStore) -> None:
+async def apply_result_message(
+    result_msg: ExperimentResultMessage, store: ExperimentStore
+) -> ExperimentResponse | None:
     """Updates `store` for a single result message -- pulled out of
     `consume_results` so it's testable directly (constructing a real
     aio-pika message/queue iterator in a unit test is not worth the
@@ -76,6 +80,7 @@ async def apply_result_message(result_msg: ExperimentResultMessage, store: Exper
     )
     await store.save(updated)
     logger.info("experiment_id=%s updated to status=%s", result_msg.experiment_id, updated.status)
+    return updated
 
 
 async def consume_results() -> None:
@@ -97,7 +102,9 @@ async def consume_results() -> None:
         async for message in queue_iter:
             async with message.process():
                 result_msg = ExperimentResultMessage.from_json(message.body.decode())
-                await apply_result_message(result_msg, store)
+                updated = await apply_result_message(result_msg, store)
+                if updated is not None:
+                    await publish_completed_experiment(json.loads(updated.model_dump_json()))
 
 
 @asynccontextmanager
@@ -111,6 +118,7 @@ async def lifespan(app: FastAPI):
         )
 
     await init_rabbitmq(RABBITMQ_URL)
+    await init_kafka()
     consumer_task = asyncio.create_task(consume_results())
     try:
         yield
@@ -121,6 +129,7 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         await close_rabbitmq()
+        await close_kafka()
         if DATABASE_URL:
             await close_db()
 
@@ -137,6 +146,7 @@ app = FastAPI(
 )
 
 app.include_router(experiments.router)
+app.include_router(similarity.router)
 app.include_router(backends.router)
 
 # Mounted at /dashboard, not "/" -- StaticFiles(html=True) at the root

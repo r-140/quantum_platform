@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Starts the whole local stack from the repo root: RabbitMQ + Postgres +
 # Kafka + TimescaleDB (docker compose), Alembic migrations, then
-# api + orchestrator + stream-analytics, each in its own venv.
+# api + orchestrator + stream-analytics + result-indexer, each in its own venv.
 #
 # Profiles (Maven-style -P, spelled --profile=<name> since this is bash):
 #   --profile=quick   (default) -- setup + start, no test runs. Fast inner
@@ -89,7 +89,7 @@ PIDS=()
 
 cleanup() {
     echo ""
-    echo "==> Stopping api + orchestrator + stream-analytics..."
+    echo "==> Stopping api + orchestrator + stream-analytics + result-indexer..."
     for pid in "${PIDS[@]:-}"; do
         kill "$pid" 2>/dev/null || true
     done
@@ -202,6 +202,10 @@ echo "==> Setting up stream-analytics..."
 setup_venv "$ROOT_DIR/services/stream-analytics"
 [ "$PROFILE" = "verify" ] && run_tests_if_present "stream-analytics" "$ROOT_DIR/services/stream-analytics"
 
+echo "==> Setting up result-indexer..."
+setup_venv "$ROOT_DIR/services/result-indexer"
+[ "$PROFILE" = "verify" ] && run_tests_if_present "result-indexer" "$ROOT_DIR/services/result-indexer"
+
 run_service() {
     local name="$1"
     local service_dir="$2"
@@ -222,6 +226,9 @@ run_service "orchestrator" "$ROOT_DIR/services/orchestrator" \
 run_service "stream-analytics" "$ROOT_DIR/services/stream-analytics" \
     .venv/bin/python3 -m app.consumer
 
+run_service "result-indexer" "$ROOT_DIR/services/result-indexer" \
+    .venv/bin/python3 -m app.worker
+
 echo ""
 echo "All services started:"
 echo "  API docs:          http://localhost:8000/docs"
@@ -231,6 +238,7 @@ echo "  Postgres:          localhost:5432 (quantum/quantum, db=quantum_platform)
 echo "  Kafka:             localhost:9092"
 echo "  TimescaleDB:       localhost:5433 (quantum/quantum, db=telemetry)"
 echo "  Logs:              $LOG_DIR/"
+echo "  Vector index log:  $LOG_DIR/result-indexer.log"
 echo ""
 echo "  Debug/ops stack (see docs/architecture/observability.md):"
 echo "  Grafana:           http://localhost:3001 (admin/admin)"
@@ -240,7 +248,7 @@ echo "  Adminer (SQL):     http://localhost:8091"
 echo "    (these come up as part of docker compose above -- may take a few"
 echo "    extra seconds after this script prints its own services as ready)"
 echo ""
-echo "Tailing logs (Ctrl+C stops api + orchestrator + stream-analytics)..."
+echo "Tailing logs (Ctrl+C stops api + orchestrator + stream-analytics + result-indexer)..."
 echo ""
 
-tail -f "$LOG_DIR/api.log" "$LOG_DIR/orchestrator.log" "$LOG_DIR/stream-analytics.log"
+tail -f "$LOG_DIR/api.log" "$LOG_DIR/orchestrator.log" "$LOG_DIR/stream-analytics.log" "$LOG_DIR/result-indexer.log"
