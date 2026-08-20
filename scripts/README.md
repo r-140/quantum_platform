@@ -1,5 +1,28 @@
 # scripts
 
+## `validate_demo.py`
+
+Runs the complete local demonstration as one system-level regression check.
+Start the stack with `./dev.sh`, then run from the repository root:
+
+```bash
+python3 scripts/validate_demo.py
+```
+
+It verifies API and Faust availability, forces a stale-calibration VQE through
+`waiting_for_calibration`, checks Grover/QPE/VQE results, validates pgvector
+duplicate retrieval, and confirms both raw and Faust-windowed VQE rows in
+TimescaleDB. It intentionally changes the persisted calibration timestamp;
+the calibration probe triggered by the VQE request immediately refreshes it.
+
+Useful options:
+
+```bash
+python3 scripts/validate_demo.py --timeout 600
+python3 scripts/validate_demo.py --api-url http://localhost:8000
+python3 scripts/validate_demo.py --faust-url http://localhost:6066
+```
+
 ## `validate_calibration_gate.py`
 
 Validates the complete stale-calibration execution path. With `./dev.sh`
@@ -37,17 +60,7 @@ Useful options:
 python3 scripts/validate_vector_search.py --timeout 180
 python3 scripts/validate_vector_search.py --api-url http://localhost:8000
 python3 scripts/validate_vector_search.py --minimum-similarity 0.85
-python3 scripts/validate_vector_search.py --algorithm sat_grover
-python3 scripts/validate_vector_search.py --algorithm qpe
-python3 scripts/validate_vector_search.py --algorithm vqe --vqe-molecule lih
 ```
-
-Supported algorithms are `grover` (default), `sat_grover`, `qpe`, and `vqe`.
-VQE defaults to three optimizer iterations and a 600-second timeout because it
-is much slower. Tune it with `--vqe-molecule`, `--vqe-max-iterations`,
-`--shots`, and `--timeout`. The default VQE similarity threshold is lower
-(`0.75`) because shot noise and optimizer trajectories can differ between two
-otherwise identical runs; other algorithms default to `0.90`.
 
 ## `observe.py`
 
@@ -74,7 +87,6 @@ Requires the full stack running (`./dev.sh` from the repo root).
 ./scripts/run_observe.sh --rate 2.0 --duration 30            # more intense and longer
 ./scripts/run_observe.sh --vqe-weight 0.5 --grover-weight 0.5 --sat-grover-weight 0 --qpe-weight 0  # almost all VQE — see the queue backlog clearly
 ./scripts/run_observe.sh --vqe-molecule h2 --vqe-weight 1 --grover-weight 0 --sat-grover-weight 0 --qpe-weight 0
-./scripts/run_observe.sh --vqe-molecule lih --vqe-shots 1024 --vqe-max-iterations 5 --vqe-weight 1 --grover-weight 0 --sat-grover-weight 0 --qpe-weight 0 --rate 0.05 --duration 5
 ./scripts/run_observe.sh --vqe-molecule lih --vqe-weight 1 --grover-weight 0 --sat-grover-weight 0 --qpe-weight 0
 ./scripts/run_observe.sh --vqe-molecule beh2 --vqe-weight 1 --grover-weight 0 --sat-grover-weight 0 --qpe-weight 0
 ```
@@ -83,11 +95,6 @@ Requires the full stack running (`./dev.sh` from the repo root).
 `h2`. `mixed` selects a molecule independently for every VQE submission.
 LiH and BeH2 Hamiltonians are generated once per orchestrator process from
 the pinned PySCF/Qiskit Nature configuration and then cached.
-
-The observer deliberately uses smaller VQE defaults than the API:
-`--vqe-shots 1024` and `--vqe-max-iterations 5`. Larger molecules contain
-many more Pauli terms than H2, so the API defaults (8192 shots and 80
-iterations) are unsuitable for a quick mixed-load demonstration.
 
 `run_observe.sh` creates its own `.venv` and installs dependencies on
 first run (and just quickly re-checks them on later runs), so you don't
