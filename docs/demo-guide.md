@@ -66,6 +66,7 @@ service's dependencies, runs Alembic migrations, and starts:
 - API;
 - orchestrator;
 - plain stream-analytics consumer;
+- Faust stream-analytics worker;
 - result indexer.
 
 Leave this terminal running. The application logs are also written under
@@ -81,6 +82,7 @@ docker compose ps
 tail -n 30 .dev-logs/api.log
 tail -n 30 .dev-logs/orchestrator.log
 tail -n 30 .dev-logs/stream-analytics.log
+tail -n 30 .dev-logs/stream-analytics-faust.log
 tail -n 30 .dev-logs/result-indexer.log
 ```
 
@@ -117,7 +119,7 @@ Use this sequence when time is limited.
 
 3. Show queued/completed transitions in the experiment dashboard.
 4. Show the `experiments` and `experiment-results` RabbitMQ queues.
-5. Start the Faust worker as described in the next section.
+5. Open the Faust analytics dashboard started by `dev.sh`.
 6. Submit a small H2 VQE and show its convergence in Grafana.
 7. Run the vector-search validator.
 8. Run the calibration-gate validator and show
@@ -128,23 +130,23 @@ the command path, Kafka is the replayable telemetry path, PostgreSQL stores
 current business state, TimescaleDB stores time-series observations, and
 pgvector provides semantic retrieval.
 
-## 5. Start Faust for window metrics
+## 5. Faust window metrics
 
-`dev.sh` does **not** start the Faust worker. Start it in another terminal
-before submitting the VQE runs whose window metrics you want to observe:
+`dev.sh` starts the Faust worker as a separate background process. Its
+dashboard is available at:
 
-```bash
-cd services/stream-analytics
-.venv/bin/python3 -m app.faust_app worker -l info
-```
+<http://localhost:6066/api/state>
 
-The Faust dashboard is then available at:
+Grafana Faust aggregated metrics dashboard:
+<http://localhost:3001/d/vqe-window-overview/vqe-window-metrics>
 
-<http://localhost:6066/dashboard/>
+Grafana VQE Overview dashboard:
+<http://localhost:3001/d/vqe-overview/vqe-overview>
 
 Faust consumes `vqe-iteration-metrics`, maintains a 60-second tumbling table,
-and publishes `vqe-window-metrics`. The plain consumer started by `dev.sh`
-persists both raw and derived events to TimescaleDB.
+and publishes `vqe-window-metrics`. The plain consumer also started by
+`dev.sh` persists both raw and derived events to TimescaleDB. The processes
+use separate Kafka consumer groups and write separate logs.
 
 ## 6. Scenario: individual algorithms
 
@@ -388,8 +390,9 @@ Long VQE jobs block later tasks because the demonstration worker has
 
 ### No VQE window metrics
 
-Ensure the Faust worker was started separately before the VQE run. Check both
-`vqe-iteration-metrics` and `vqe-window-metrics` in Kafka UI.
+Check `.dev-logs/stream-analytics-faust.log`, then check both
+`vqe-iteration-metrics` and `vqe-window-metrics` in Kafka UI. Confirm that port
+`6066` is free if the Faust worker failed during startup.
 
 ### Similarity endpoint returns 404
 

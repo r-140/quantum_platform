@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Starts the whole local stack from the repo root: RabbitMQ + Postgres +
 # Kafka + TimescaleDB (docker compose), Alembic migrations, then
-# api + orchestrator + stream-analytics + result-indexer, each in its own venv.
+# api + orchestrator + stream-analytics sink + Faust analytics +
+# result-indexer, each in its own process (and each service in its own venv).
 #
 # Profiles (Maven-style -P, spelled --profile=<name> since this is bash):
 #   --profile=quick   (default) -- setup + start, no test runs. Fast inner
@@ -44,7 +45,7 @@
 #   ./dev.sh --clean
 #   ./dev.sh --clean --profile=verify
 #
-# Logs for api/orchestrator/stream-analytics are written to .dev-logs/
+# Logs for api/orchestrator/stream-analytics/Faust/result-indexer are written to .dev-logs/
 # (gitignored) and tailed live in this terminal.
 #
 # First run creates each service's .venv automatically if missing, and
@@ -89,7 +90,7 @@ PIDS=()
 
 cleanup() {
     echo ""
-    echo "==> Stopping api + orchestrator + stream-analytics + result-indexer..."
+    echo "==> Stopping api + orchestrator + stream-analytics + stream-analytics-faust + result-indexer..."
     for pid in "${PIDS[@]:-}"; do
         kill "$pid" 2>/dev/null || true
     done
@@ -226,6 +227,9 @@ run_service "orchestrator" "$ROOT_DIR/services/orchestrator" \
 run_service "stream-analytics" "$ROOT_DIR/services/stream-analytics" \
     .venv/bin/python3 -m app.consumer
 
+run_service "stream-analytics-faust" "$ROOT_DIR/services/stream-analytics" \
+    .venv/bin/python3 -m app.faust_app worker -l info
+
 run_service "result-indexer" "$ROOT_DIR/services/result-indexer" \
     .venv/bin/python3 -m app.worker
 
@@ -237,7 +241,9 @@ echo "  RabbitMQ UI:       http://localhost:15672 (guest/guest)"
 echo "  Postgres:          localhost:5432 (quantum/quantum, db=quantum_platform)"
 echo "  Kafka:             localhost:9092"
 echo "  TimescaleDB:       localhost:5433 (quantum/quantum, db=telemetry)"
+echo "  Faust dashboard:   http://localhost:6066/dashboard/"
 echo "  Logs:              $LOG_DIR/"
+echo "  Faust log:         $LOG_DIR/stream-analytics-faust.log"
 echo "  Vector index log:  $LOG_DIR/result-indexer.log"
 echo ""
 echo "  Debug/ops stack (see docs/architecture/observability.md):"
@@ -248,7 +254,9 @@ echo "  Adminer (SQL):     http://localhost:8091"
 echo "    (these come up as part of docker compose above -- may take a few"
 echo "    extra seconds after this script prints its own services as ready)"
 echo ""
-echo "Tailing logs (Ctrl+C stops api + orchestrator + stream-analytics + result-indexer)..."
+echo "Tailing logs (Ctrl+C stops api + orchestrator + stream-analytics + Faust + result-indexer)..."
 echo ""
 
-tail -f "$LOG_DIR/api.log" "$LOG_DIR/orchestrator.log" "$LOG_DIR/stream-analytics.log" "$LOG_DIR/result-indexer.log"
+tail -f "$LOG_DIR/api.log" "$LOG_DIR/orchestrator.log" \
+    "$LOG_DIR/stream-analytics.log" "$LOG_DIR/stream-analytics-faust.log" \
+    "$LOG_DIR/result-indexer.log"

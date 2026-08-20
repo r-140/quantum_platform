@@ -51,11 +51,14 @@ stores append-only time-series observations.
 3. creates/updates per-service virtual environments;
 4. optionally runs tests under `--profile=verify`;
 5. runs API Alembic migrations;
-6. starts API, orchestrator, plain stream consumer, and result indexer;
+6. starts API, orchestrator, plain stream consumer, Faust worker, and result
+   indexer;
 7. tails their logs.
 
-It does not start `app.faust_app`; run that separately when windowed Faust
-processing is required.
+The plain consumer and Faust worker deliberately remain separate OS processes,
+although they share the stream-analytics virtual environment. This gives them
+independent Kafka consumer groups, logs, failure boundaries, and entry points.
+`dev.sh` manages both for local development.
 
 When adding a new continuously running service, update:
 
@@ -393,4 +396,3 @@ Before committing:
 8. update architecture and interpretation documentation;
 9. check `git diff --check` and `git status`;
 10. avoid `./dev.sh --clean` unless data deletion is intentional.
-
