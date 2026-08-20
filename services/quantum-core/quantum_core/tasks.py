@@ -54,7 +54,7 @@ class ExperimentResultMessage:
     """
 
     experiment_id: str
-    status: str  # "completed" | "failed"
+    status: str  # "waiting_for_calibration" | "completed" | "failed"
     result: dict[str, Any] | None = None
     error: str | None = None
 

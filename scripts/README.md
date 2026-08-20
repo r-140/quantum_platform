@@ -1,5 +1,20 @@
 # scripts
 
+## `validate_calibration_gate.py`
+
+Validates the complete stale-calibration execution path. With `./dev.sh`
+running:
+
+```bash
+python3 scripts/validate_calibration_gate.py
+```
+
+It makes the current backend snapshot stale, submits a minimal H2 VQE, asserts
+that the dashboard/API-visible state becomes `waiting_for_calibration`, and
+then verifies that the triggered probe refreshes the snapshot and execution
+resumes. The script intentionally modifies only the observation timestamp; the
+next probe restores it automatically.
+
 ## `validate_vector_search.py`
 
 Runs a dependency-free end-to-end smoke test of semantic experiment search.

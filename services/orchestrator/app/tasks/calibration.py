@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
@@ -46,6 +47,7 @@ logger = logging.getLogger("orchestrator.calibration")
 
 CALIBRATION_TOPIC = "calibration-results"
 DEFAULT_SHOTS = 1024
+DEMO_ERROR_RATE = float(os.environ.get("CALIBRATION_DEMO_ERROR_RATE", "0"))
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,29 @@ def _build_bell_circuit() -> QuantumCircuit:
     return qc
 
 
+def _inject_demo_parity_errors(
+    counts: dict[str, int], requested_error_rate: float
+) -> dict[str, int]:
+    """Deterministic demo hook; does not model a physical noise channel.
+
+    Moves enough even-parity observations to odd parity to make the requested
+    rate visible to the real policy and persistence path. Disabled by default.
+    """
+    if not 0.0 <= requested_error_rate <= 1.0:
+        raise ValueError("CALIBRATION_DEMO_ERROR_RATE must be between 0 and 1")
+    adjusted = dict(counts)
+    total = sum(adjusted.values())
+    target = int(round(total * requested_error_rate))
+    current = adjusted.get("01", 0) + adjusted.get("10", 0)
+    remaining = max(0, target - current)
+    for source, destination in (("00", "01"), ("11", "10")):
+        moved = min(adjusted.get(source, 0), remaining)
+        adjusted[source] = adjusted.get(source, 0) - moved
+        adjusted[destination] = adjusted.get(destination, 0) + moved
+        remaining -= moved
+    return adjusted
+
+
 async def run_calibration(backend: QuantumBackend, *, shots: int = DEFAULT_SHOTS) -> CalibrationResult:
     """Runs one calibration cycle: submit the Bell circuit, wait for the
     result via the standard hw/sw synchronization primitive (same
@@ -82,6 +107,8 @@ async def run_calibration(backend: QuantumBackend, *, shots: int = DEFAULT_SHOTS
     result = await wait_for_result(backend, handle, config=PollingConfig(timeout_s=30.0))
 
     counts = result.counts or {}
+    if DEMO_ERROR_RATE:
+        counts = _inject_demo_parity_errors(counts, DEMO_ERROR_RATE)
     total = sum(counts.values()) or 1  # avoid division by zero on a degenerate empty result
     inconsistent = counts.get("01", 0) + counts.get("10", 0)
     error_rate = inconsistent / total
@@ -104,6 +131,8 @@ async def run_calibration_loop(
     producer: AIOKafkaProducer,
     *,
     interval_s: float = 300.0,
+    state_store=None,
+    trigger: asyncio.Event | None = None,
 ) -> None:
     """Runs `run_calibration` repeatedly forever, with `interval_s` between
     cycles (default 5 minutes). Meant to be launched as a background
@@ -113,8 +142,12 @@ async def run_calibration_loop(
     connection used for task processing).
     """
     while True:
+        if trigger is not None:
+            trigger.clear()
         try:
             result = await run_calibration(backend)
+            if state_store is not None:
+                await state_store.save(result)
             await publish_calibration_result(producer, result)
             logger.info(
                 "calibration cycle: error_rate=%.4f shots=%d", result.error_rate, result.shots
@@ -122,7 +155,13 @@ async def run_calibration_loop(
         except Exception:  # noqa: BLE001 -- a failed calibration cycle shouldn't crash the loop
             logger.exception("calibration cycle failed, will retry after interval")
 
-        await asyncio.sleep(interval_s)
+        if trigger is None:
+            await asyncio.sleep(interval_s)
+            continue
+        try:
+            await asyncio.wait_for(trigger.wait(), timeout=interval_s)
+        except asyncio.TimeoutError:
+            pass
 
 
 if __name__ == "__main__":

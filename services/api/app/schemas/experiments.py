@@ -88,6 +88,7 @@ ExperimentRequest = Annotated[
 
 class ExperimentStatus(str, Enum):
     QUEUED = "queued"
+    WAITING_FOR_CALIBRATION = "waiting_for_calibration"
     COMPLETED = "completed"
     FAILED = "failed"
 

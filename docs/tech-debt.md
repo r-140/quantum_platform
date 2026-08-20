@@ -129,6 +129,13 @@ one specific service.
   Prefect/Airflow DAG — decided that a full DAG engine is overkill for
   a single "freshness" check; more natural via a Postgres/Redis snapshot
   of the last known calibration state;
+  **✅ Done for VQE** — the latest Bell verification observation is persisted
+  in PostgreSQL, evaluated by a pure freshness/error policy, and exposed as
+  `waiting_for_calibration`. Missing/stale work is rescheduled through a
+  RabbitMQ TTL/dead-letter queue without sleeping in the worker; an event
+  triggers and deduplicates immediate probes. See
+  `docs/architecture/calibration-aware-execution.md`. A larger scheduled
+  Airflow probe suite remains optional future work.
 - `fast-control` (a low-latency control loop in Rust/Go) — from the very
   first architecture sketch; not implemented, since the current
   infrastructure runs entirely on `AerBackend` (a local simulator with

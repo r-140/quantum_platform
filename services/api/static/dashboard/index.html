@@ -18,6 +18,7 @@
     --accent: #4FD1E8;
     --accent-dim: #2A6B78;
     --queued: #E8B44F;
+    --waiting: #B58AE8;
     --completed: #4FE8A0;
     --failed: #E85F5F;
   }
@@ -244,10 +245,12 @@
   }
 
   .status-queued .status-dot { background: var(--queued); animation: pulse-slow 1.4s ease-in-out infinite; }
+  .status-waiting_for_calibration .status-dot { background: var(--waiting); animation: pulse-slow 1.4s ease-in-out infinite; }
   .status-completed .status-dot { background: var(--completed); }
   .status-failed .status-dot { background: var(--failed); }
 
   .status-queued { color: var(--queued); }
+  .status-waiting_for_calibration { color: var(--waiting); }
   .status-completed { color: var(--completed); }
   .status-failed { color: var(--failed); }
 
@@ -420,6 +423,7 @@
   <select id="filterStatus">
     <option value="">all statuses</option>
     <option value="queued">queued</option>
+    <option value="waiting_for_calibration">waiting for calibration</option>
     <option value="completed">completed</option>
     <option value="failed">failed</option>
   </select>
@@ -487,7 +491,12 @@ function experimentLabel(exp) {
     : null;
   return molecule ? `${algorithm} · ${moleculeLabel(molecule)}` : algorithm;
 }
-const STATUS_LABELS = { queued: 'queued', completed: 'completed', failed: 'failed' };
+const STATUS_LABELS = {
+  queued: 'queued',
+  waiting_for_calibration: 'waiting for calibration',
+  completed: 'completed',
+  failed: 'failed'
+};
 
 function fmtTime(iso) {
   if (!iso) return '—';
@@ -528,9 +537,14 @@ function renderStats(stats) {
   }
   const total = Object.values(totals).reduce((a, b) => a + b, 0);
 
-  const dotColor = { queued: 'var(--queued)', completed: 'var(--completed)', failed: 'var(--failed)' };
+  const dotColor = {
+    queued: 'var(--queued)',
+    waiting_for_calibration: 'var(--waiting)',
+    completed: 'var(--completed)',
+    failed: 'var(--failed)'
+  };
   const pills = [`<div class="stat-pill"><span class="algo">total</span><span class="mono">${total}</span></div>`];
-  for (const status of ['queued', 'completed', 'failed']) {
+  for (const status of ['queued', 'waiting_for_calibration', 'completed', 'failed']) {
     if (!totals[status]) continue;
     pills.push(`
       <div class="stat-pill">

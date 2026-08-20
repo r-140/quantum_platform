@@ -54,6 +54,23 @@ async def test_failed_result_updates_store() -> None:
     assert updated.result is None
 
 
+async def test_waiting_for_calibration_is_non_terminal() -> None:
+    store = InMemoryExperimentStore()
+    await store.save(_queued_experiment("abc"))
+
+    result = await apply_result_message(
+        ExperimentResultMessage(
+            experiment_id="abc", status="waiting_for_calibration"
+        ),
+        store,
+    )
+
+    assert result is not None
+    assert result.status == ExperimentStatus.WAITING_FOR_CALIBRATION
+    assert result.completed_at is None
+    assert result.result is None
+
+
 async def test_unknown_experiment_id_is_ignored_not_raised() -> None:
     """A result for an id the store doesn't know about (e.g. from an
     experiment submitted to a previous API process instance while running

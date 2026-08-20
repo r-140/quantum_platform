@@ -68,13 +68,25 @@ async def apply_result_message(
         logger.warning("received result for unknown experiment_id=%s", result_msg.experiment_id)
         return
 
+    status_by_message = {
+        "waiting_for_calibration": ExperimentStatus.WAITING_FOR_CALIBRATION,
+        "completed": ExperimentStatus.COMPLETED,
+        "failed": ExperimentStatus.FAILED,
+    }
+    if result_msg.status not in status_by_message:
+        logger.warning(
+            "ignoring unknown result status=%s for experiment_id=%s",
+            result_msg.status,
+            result_msg.experiment_id,
+        )
+        return None
+
+    terminal = result_msg.status in {"completed", "failed"}
     updated = existing.model_copy(
         update={
-            "status": ExperimentStatus.COMPLETED
-            if result_msg.status == "completed"
-            else ExperimentStatus.FAILED,
-            "completed_at": utcnow(),
-            "result": result_msg.result,
+            "status": status_by_message[result_msg.status],
+            "completed_at": utcnow() if terminal else None,
+            "result": result_msg.result if terminal else existing.result,
             "error": result_msg.error,
         }
     )
@@ -103,7 +115,7 @@ async def consume_results() -> None:
             async with message.process():
                 result_msg = ExperimentResultMessage.from_json(message.body.decode())
                 updated = await apply_result_message(result_msg, store)
-                if updated is not None:
+                if updated is not None and result_msg.status in {"completed", "failed"}:
                     await publish_completed_experiment(json.loads(updated.model_dump_json()))
 
 
